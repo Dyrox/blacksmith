@@ -1,0 +1,110 @@
+# Every push to main builds Blacksmith for Windows and macOS and publishes a
+# GitHub Release tagged v<major>.<minor>.<run>. Pull requests only build.
+
+name: Build & release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' Cargo.toml | head -n 1)
+          echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - name: Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/blacksmith.exe dist/Blacksmith.exe
+          Compress-Archive -Path dist/Blacksmith.exe -DestinationPath "dist/Blacksmith-$env:VERSION-windows-x64.zip"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: dist/*.zip
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - name: Universal app
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          APP=dist/Blacksmith.app
+          mkdir -p "$APP/Contents/MacOS"
+          lipo -create -output "$APP/Contents/MacOS/blacksmith" \
+            target/aarch64-apple-darwin/release/blacksmith target/x86_64-apple-darwin/release/blacksmith
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Blacksmith</string>
+            <key>CFBundleIdentifier</key><string>app.blacksmith.upgrader</string>
+            <key>CFBundleExecutable</key><string>blacksmith</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          cd dist && ditto -c -k --keepParent Blacksmith.app "Blacksmith-$VERSION-macos-universal.zip"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: macos
+          path: dist/*.zip
+
+  release:
+    needs: [version, windows, macos]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: Blacksmith ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/*
+          body: |
+            Not signed by Apple or Microsoft yet. macOS, first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway.
