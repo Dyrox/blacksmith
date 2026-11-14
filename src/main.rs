@@ -22,8 +22,9 @@ use iced::{
 };
 
 fn main() -> iced::Result {
+    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     // `blacksmith a.flp b.flp …` converts without opening a window.
-    let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let files = args;
     if !files.is_empty() {
         for f in &files {
             let s = run(f, true);
@@ -138,7 +139,8 @@ fn reveal_in_folder(path: &Path) {
 fn badge(how: &How) -> (String, Tone) {
     match how {
         How::Known(_) => ("官方支持".into(), Tone::Green),
-        How::Generic => ("通用转换".into(), Tone::Blue),
+        How::Generic { derived: false } => ("通用转换".into(), Tone::Blue),
+        How::Generic { derived: true } => ("通用转换 · 推导 ID".into(), Tone::Blue),
         How::AlreadyVst3 => ("已是 VST3".into(), Tone::Grey),
         How::Skipped(why) => (format!("跳过 · {why}"), Tone::Warn),
     }
@@ -156,6 +158,8 @@ struct Item {
 struct App {
     dark: bool,
     hovering: bool,
+    /// Showing the list of officially supported plugins instead of the projects.
+    supported: bool,
     items: Vec<Item>,
     now: Instant,
 }
@@ -165,6 +169,7 @@ enum Message {
     Dropped(PathBuf),
     Hover(bool),
     Browse,
+    ToggleSupported,
     Picked(Vec<PathBuf>),
     Convert,
     Clear,
@@ -182,7 +187,7 @@ const FADE: f32 = 0.28;
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let dark = platform::system_dark().unwrap_or(false);
-        let mut app = Self { dark, hovering: false, items: Vec::new(), now: Instant::now() };
+        let mut app = Self { dark, hovering: false, supported: false, items: Vec::new(), now: Instant::now() };
         // Debug aid: BLACKSMITH_DROP=<file> behaves as if that file was dropped at launch.
         if let Some(f) = std::env::var_os("BLACKSMITH_DROP") {
             app.add(PathBuf::from(f));
@@ -208,8 +213,10 @@ impl App {
         match message {
             Message::Dropped(path) => {
                 self.hovering = false;
+                self.supported = false;
                 self.add(path);
             }
+            Message::ToggleSupported => self.supported = !self.supported,
             Message::Hover(h) => self.hovering = h,
             Message::Browse => {
                 return Task::perform(
@@ -225,7 +232,12 @@ impl App {
                     Message::Picked,
                 );
             }
-            Message::Picked(paths) => paths.into_iter().for_each(|p| self.add(p)),
+            Message::Picked(paths) => {
+                if !paths.is_empty() {
+                    self.supported = false;
+                }
+                paths.into_iter().for_each(|p| self.add(p));
+            }
             Message::Convert => {
                 for item in &mut self.items {
                     if matches!(item.state, State::Ready { .. }) {
@@ -294,11 +306,15 @@ impl App {
             ]
             .spacing(2),
             Space::new().width(Length::Fill),
+            secondary(p, if self.supported { "返回" } else { "官方支持列表" }, Some(Message::ToggleSupported)),
             secondary(p, "选择文件…", Some(Message::Browse)),
         ]
+        .spacing(8)
         .align_y(Alignment::Center);
 
-        let content: Element<'_, Message> = if self.items.is_empty() {
+        let content: Element<'_, Message> = if self.supported {
+            self.supported_list(p)
+        } else if self.items.is_empty() {
             self.empty(p)
         } else {
             let mut cards = Column::new().spacing(10);
@@ -349,6 +365,76 @@ impl App {
             .height(Length::Fill)
             .style(move |_| container::Style { background: Some(Background::Color(chrome)), ..Default::default() })
             .into()
+    }
+
+    fn supported_list(&self, p: &'static Palette) -> Element<'_, Message> {
+        let section = |title: &'static str| t(title).size(12).font(SEMIBOLD).color(p.text_2);
+        let mut rules = Column::new().spacing(6);
+        for r in plugins::RULES {
+            rules = rules.push(
+                container(
+                    column![
+                        row![
+                            t(r.name).size(14).font(SEMIBOLD).color(p.text),
+                            t(r.vendor).size(12).color(p.text_2),
+                            Space::new().width(Length::Fill),
+                            pill("官方支持", Tone::Green, p, 1.0),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                        t(r.note).size(12).color(p.text_3),
+                    ]
+                    .spacing(3),
+                )
+                .padding([9, 12])
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(p.line)),
+                    border: Border { radius: Radius::from(8.0), ..Default::default() },
+                    ..Default::default()
+                }),
+            );
+        }
+
+        let legend = [
+            (How::Known(""), "有专门规则、在 FL 里验证过的插件"),
+            (How::Generic { derived: false }, "按 VST3 规范转换；VST3 的 ID 来自 FL 自己的记录或工程里已有的 VST3"),
+            (How::Generic { derived: true }, "按 VST3 规范转换；ID 按 Steinberg 规则推导，个别厂商（如 FabFilter）不遵守，可能打不开"),
+            (How::AlreadyVst3, "已经是 VST3，不动"),
+            (How::Skipped(String::new()), "无法转换，原样保留 VST2"),
+        ];
+        let mut explain = Column::new().spacing(8);
+        for (how, text) in legend {
+            let (label, tone) = badge(&how);
+            explain = explain.push(
+                row![
+                    container(pill(label.trim_end_matches(" · ").to_string(), tone, p, 1.0)).width(150),
+                    t(text).size(12).color(p.text_2).width(Length::Fill),
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+
+        let body = column![
+            section("官方支持的插件"),
+            rules,
+            Space::new().height(10),
+            section("标签说明"),
+            explain,
+            Space::new().height(6),
+            t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(11).color(p.text_3),
+        ]
+        .spacing(8);
+        scrollable(
+            container(body).padding(16).width(Length::Fill).style(move |_| container::Style {
+                background: Some(Background::Color(p.panel)),
+                border: Border { color: p.border, width: 1.0, radius: Radius::from(12.0) },
+                ..Default::default()
+            }),
+        )
+        .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4).spacing(6)))
+        .height(Length::Fill)
+        .into()
     }
 
     fn empty(&self, p: &'static Palette) -> Element<'_, Message> {

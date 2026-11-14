@@ -9,6 +9,9 @@ use crate::flp::read_records;
 
 pub struct Rule {
     pub name: &'static str,
+    pub vendor: &'static str,
+    /// Shown in the app's list of supported plugins.
+    pub note: &'static str,
     /// VST2 unique ID as an integer (FL stores it little-endian).
     pub fourcc: u32,
     pub class_id: [u8; 16],
@@ -25,8 +28,10 @@ impl Rule {
     }
 }
 
-const RULES: &[Rule] = &[Rule {
+pub const RULES: &[Rule] = &[Rule {
     name: "Serum",
+    vendor: "Xfer Records",
+    note: "Serum 1 · 音色原样迁移，已在 FL Studio 2025 验证",
     fourcc: u32::from_be_bytes(*b"XfsX"),
     class_id: *b"XTSVsfsXerum\0\0\0\0",
     template: include_bytes!("../assets/serum-vst3-template.bin"),
