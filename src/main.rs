@@ -3,28 +3,22 @@
 
 mod convert;
 mod flp;
-mod platform;
 mod plugins;
+mod style;
 mod vst3;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use convert::How;
-use iced::border::Radius;
-use iced::theme::Mode;
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::text::Shaping;
-use iced::widget::{Column, Space, Text, button, center, column, container, row, scrollable, text};
-use iced::{
-    Alignment, Background, Border, Color, Element, Event, Font, Length, Padding, Shadow, Size, Subscription, Task,
-    Theme, event, font, system, window,
-};
+use iced::widget::{Column, Space, button, center, column, container, row, scrollable, stack};
+use iced::{Alignment, Element, Event, Length, Padding, Size, Subscription, Task, Theme, event, window};
+use style::*;
 
 fn main() -> iced::Result {
-    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     // `blacksmith a.flp b.flp …` converts without opening a window.
-    let files = args;
+    let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if !files.is_empty() {
         for f in &files {
             let s = run(f, true);
@@ -37,10 +31,10 @@ fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("Blacksmith")
         .subscription(App::subscription)
-        .theme(|app: &App| if app.dark { Theme::Dark } else { Theme::Light })
+        .theme(|_: &App| Theme::Dark)
         .window(window::Settings {
-            size: Size::new(600.0, 560.0),
-            min_size: Some(Size::new(440.0, 380.0)),
+            size: Size::new(860.0, 600.0),
+            min_size: Some(Size::new(680.0, 480.0)),
             ..Default::default()
         })
         .run()
@@ -135,7 +129,7 @@ fn reveal_in_folder(path: &Path) {
     let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(Path::new("."))).spawn();
 }
 
-/// Label and colours for a plugin's outcome.
+/// Label and colour for a plugin's outcome.
 fn badge(how: &How) -> (String, Tone) {
     match how {
         How::Known(_) => ("官方支持".into(), Tone::Green),
@@ -148,6 +142,12 @@ fn badge(how: &How) -> (String, Tone) {
 
 // ------------------------------------------------------------------ app
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Page {
+    Convert,
+    Supported,
+}
+
 struct Item {
     path: PathBuf,
     state: State,
@@ -156,43 +156,77 @@ struct Item {
 }
 
 struct App {
-    dark: bool,
+    page: Page,
     hovering: bool,
-    /// Showing the list of officially supported plugins instead of the projects.
-    supported: bool,
     items: Vec<Item>,
     now: Instant,
+    /// Animation clocks: launch, last page switch, last drag-hover change,
+    /// last change to what the big button does.
+    boot_at: Instant,
+    page_at: Instant,
+    hover_at: Instant,
+    cta_at: Instant,
+    /// The launch animation starts at the first rendered frame, not at boot,
+    /// so a slow GPU start doesn't eat it.
+    started: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Dropped(PathBuf),
     Hover(bool),
+    Nav(Page),
     Browse,
-    ToggleSupported,
     Picked(Vec<PathBuf>),
     Convert,
     Clear,
     Remove(usize),
     Reveal(PathBuf),
-    Theme(Mode),
-    Focused,
     Frame(Instant),
 }
 
 /// Reveal animation: card header first, then each plugin row a beat later.
 const STAGGER: f32 = 0.06;
-const FADE: f32 = 0.28;
+const FADE: f32 = 0.30;
+const SLIDE: f32 = 0.55;
+
+fn ease_out_cubic(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    1.0 - (1.0 - x).powi(3)
+}
+
+/// Overshoots past 1 and settles back: the "pop".
+fn ease_out_back(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    const C1: f32 = 1.9;
+    const C3: f32 = C1 + 1.0;
+    1.0 + C3 * (x - 1.0).powi(3) + C1 * (x - 1.0).powi(2)
+}
 
 impl App {
-    fn boot() -> (Self, Task<Message>) {
-        let dark = platform::system_dark().unwrap_or(false);
-        let mut app = Self { dark, hovering: false, supported: false, items: Vec::new(), now: Instant::now() };
-        // Debug aid: BLACKSMITH_DROP=<file> behaves as if that file was dropped at launch.
+    fn boot() -> Self {
+        let now = Instant::now();
+        let mut app = Self {
+            page: Page::Convert,
+            hovering: false,
+            items: Vec::new(),
+            now,
+            boot_at: now,
+            page_at: now,
+            // As if the last hover ended long ago, so nothing swells at launch.
+            hover_at: now.checked_sub(Duration::from_secs(10)).unwrap_or(now),
+            cta_at: now,
+            started: false,
+        };
+        // Debug aids: BLACKSMITH_DROP=<file> acts as a drop at launch;
+        // BLACKSMITH_PAGE=supported opens the supported-plugins page.
         if let Some(f) = std::env::var_os("BLACKSMITH_DROP") {
             app.add(PathBuf::from(f));
         }
-        (app, system::theme().map(Message::Theme))
+        if std::env::var("BLACKSMITH_PAGE").as_deref() == Ok("supported") {
+            app.page = Page::Supported;
+        }
+        app
     }
 
     fn add(&mut self, path: PathBuf) {
@@ -202,7 +236,21 @@ impl App {
             Some(existing) => *existing = item,
             None => self.items.push(item),
         }
+        self.go(Page::Convert);
+        self.cta_at = Instant::now();
         self.now = Instant::now();
+    }
+
+    fn go(&mut self, page: Page) {
+        if self.page != page {
+            self.page = page;
+            self.page_at = Instant::now();
+        }
+    }
+
+    /// Seconds since `at`, on the animation clock.
+    fn since(&self, at: Instant) -> f32 {
+        self.now.saturating_duration_since(at).as_secs_f32()
     }
 
     fn ready(&self) -> usize {
@@ -213,11 +261,19 @@ impl App {
         match message {
             Message::Dropped(path) => {
                 self.hovering = false;
-                self.supported = false;
                 self.add(path);
             }
-            Message::ToggleSupported => self.supported = !self.supported,
-            Message::Hover(h) => self.hovering = h,
+            Message::Hover(h) => {
+                if self.hovering != h {
+                    self.hovering = h;
+                    self.hover_at = Instant::now();
+                    self.now = self.hover_at;
+                }
+            }
+            Message::Nav(page) => {
+                self.go(page);
+                self.now = Instant::now();
+            }
             Message::Browse => {
                 return Task::perform(
                     async {
@@ -232,54 +288,78 @@ impl App {
                     Message::Picked,
                 );
             }
-            Message::Picked(paths) => {
-                if !paths.is_empty() {
-                    self.supported = false;
-                }
-                paths.into_iter().for_each(|p| self.add(p));
-            }
+            Message::Picked(paths) => paths.into_iter().for_each(|p| self.add(p)),
             Message::Convert => {
+                let now = Instant::now();
                 for item in &mut self.items {
                     if matches!(item.state, State::Ready { .. }) {
                         item.state = run(&item.path, true);
+                        item.shown_at = now; // pop the updated card in again
                     }
                 }
+                self.cta_at = now;
+                self.now = now;
             }
-            Message::Clear => self.items.clear(),
+            Message::Clear => {
+                self.items.clear();
+                self.boot_at = Instant::now(); // replay the welcome pop
+                self.cta_at = self.boot_at;
+                self.now = self.boot_at;
+            }
             Message::Remove(i) => {
                 if i < self.items.len() {
                     self.items.remove(i);
                 }
             }
             Message::Reveal(path) => reveal_in_folder(&path),
-            Message::Theme(mode) => {
-                if platform::system_dark().is_none() {
-                    self.dark = mode == Mode::Dark;
+            Message::Frame(now) => {
+                if !self.started {
+                    self.started = true;
+                    self.boot_at = now;
+                    self.cta_at = now;
+                    self.items.iter_mut().for_each(|i| i.shown_at = now);
                 }
+                self.now = now;
             }
-            // macOS doesn't deliver appearance changes to the window; re-read on focus.
-            Message::Focused => {
-                if let Some(d) = platform::system_dark() {
-                    self.dark = d;
-                }
-            }
-            Message::Frame(now) => self.now = now,
         }
         Task::none()
     }
 
     fn animating(&self) -> bool {
-        self.items.iter().any(|i| {
+        let items = self.items.iter().any(|i| {
             let rows = i.state.groups().len() as f32;
-            self.now.duration_since(i.shown_at) < Duration::from_secs_f32(FADE + STAGGER * (rows + 1.0) + 0.05)
-        })
+            self.since(i.shown_at) < SLIDE + STAGGER * (rows + 1.0) + 0.05
+        });
+        !self.started
+            || items
+            || self.since(self.boot_at) < 1.0
+            || self.since(self.page_at) < 0.7
+            || self.since(self.hover_at) < 0.7
+            || self.since(self.cta_at) < 0.7
     }
 
-    /// 0 → 1 progress of the n-th element of an item's reveal (eased).
-    fn reveal(&self, item: &Item, n: usize) -> f32 {
-        let t = self.now.saturating_duration_since(item.shown_at).as_secs_f32() - STAGGER * n as f32;
-        let x = (t / FADE).clamp(0.0, 1.0);
-        1.0 - (1.0 - x).powi(3)
+    /// The n-th element of an item's reveal: (opacity, springy slide progress).
+    fn reveal(&self, item: &Item, n: usize) -> (f32, f32) {
+        let t = self.since(item.shown_at) - STAGGER * n as f32;
+        (ease_out_cubic(t / FADE), ease_out_back(t / SLIDE))
+    }
+
+    /// Scale of the welcome orb: pops in at launch, swells while a file hovers.
+    fn orb_scale(&self, delay: f32) -> f32 {
+        let pop = 0.55 + 0.45 * ease_out_back((self.since(self.boot_at) - delay) / 0.7);
+        let k = ease_out_back(self.since(self.hover_at) / 0.55);
+        let swell = if self.hovering { 1.0 + 0.14 * k } else { 1.14 - 0.14 * k };
+        pop * swell
+    }
+
+    /// Scale of the big round button: pops whenever what it does changes.
+    fn cta_scale(&self) -> f32 {
+        0.7 + 0.3 * ease_out_back(self.since(self.cta_at) / 0.55)
+    }
+
+    /// Extra left offset of the page content while it slides in.
+    fn page_offset(&self) -> f32 {
+        36.0 * (1.0 - ease_out_back(self.since(self.page_at) / 0.6))
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -287,112 +367,250 @@ impl App {
             Event::Window(window::Event::FileDropped(p)) => Some(Message::Dropped(p)),
             Event::Window(window::Event::FileHovered(_)) => Some(Message::Hover(true)),
             Event::Window(window::Event::FilesHoveredLeft) => Some(Message::Hover(false)),
-            Event::Window(window::Event::Focused) => Some(Message::Focused),
             _ => None,
         });
         let frames = if self.animating() { window::frames().map(Message::Frame) } else { Subscription::none() };
-        Subscription::batch([events, system::theme_changes().map(Message::Theme), frames])
+        Subscription::batch([events, frames])
     }
 
     // -------------------------------------------------------------- views
 
     fn view(&self) -> Element<'_, Message> {
-        let p = if self.dark { &DARK } else { &LIGHT };
-
-        let header = row![
-            column![
-                t("Blacksmith").size(20).font(BOLD).color(p.text),
-                t("FL Studio 工程 · VST2 → VST3").size(12).color(p.text_2),
-            ]
-            .spacing(2),
-            Space::new().width(Length::Fill),
-            secondary(p, if self.supported { "返回" } else { "官方支持列表" }, Some(Message::ToggleSupported)),
-            secondary(p, "选择文件…", Some(Message::Browse)),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        let content: Element<'_, Message> = if self.supported {
-            self.supported_list(p)
-        } else if self.items.is_empty() {
-            self.empty(p)
-        } else {
-            let mut cards = Column::new().spacing(10);
-            for (i, item) in self.items.iter().enumerate() {
-                cards = cards.push(self.card(i, item, p));
-            }
-            cards = cards.push(
-                container(t("拖入更多 .flp 文件").size(12).color(p.text_3)).width(Length::Fill).center_x(Length::Fill).padding(8),
-            );
-            scrollable(cards)
-                .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4).spacing(6)))
-                .height(Length::Fill)
-                .into()
+        let main = match self.page {
+            Page::Convert if self.items.is_empty() => self.welcome(),
+            Page::Convert => self.projects(),
+            Page::Supported => self.supported(),
         };
-        // The whole content area is the drop target; outline it while hovering.
+        let backdrop = match self.page {
+            Page::Convert => FORGE,
+            Page::Supported => TIDE,
+        };
         let hovering = self.hovering;
-        let content = container(content).padding(if self.items.is_empty() { 0 } else { 2 }).height(Length::Fill).style(
-            move |_| container::Style {
-                border: Border {
-                    color: if hovering { p.accent } else { Color::TRANSPARENT },
-                    width: 1.5,
-                    radius: Radius::from(14.0),
-                },
-                ..Default::default()
-            },
-        );
-
-        let ready = self.ready();
-        let done = self.items.iter().filter(|i| matches!(i.state, State::Done { .. })).count();
-        let status = match (self.items.len(), ready, done) {
-            (0, ..) => String::new(),
-            (n, 0, 0) => format!("{n} 个工程 · 没有可转换的插件"),
-            (n, 0, d) => format!("{n} 个工程 · 已转换 {d} 个"),
-            (n, r, _) => format!("{n} 个工程 · {r} 个插件待转换"),
-        };
-        let mut actions = row![].spacing(8);
-        if !self.items.is_empty() {
-            actions = actions.push(secondary(p, "清空", Some(Message::Clear)));
-        }
-        let label = if ready > 0 { format!("转换 {ready} 个插件") } else { "转换".into() };
-        actions = actions.push(primary(p, label, (ready > 0).then_some(Message::Convert)));
-        let footer = row![t(status).size(12).color(p.text_2), Space::new().width(Length::Fill), actions].align_y(Alignment::Center);
-
-        let chrome = p.chrome;
-        container(column![header, content, footer].spacing(14))
-            .padding(18)
+        let main = container(container(main).padding(Padding { left: self.page_offset().max(-6.0), ..Padding::ZERO }))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(move |_| container::Style { background: Some(Background::Color(chrome)), ..Default::default() })
+            .style(move |_| backdrop_style(backdrop, hovering));
+        row![self.sidebar(), main].into()
+    }
+
+    fn sidebar(&self) -> Element<'_, Message> {
+        let nav = |label: &'static str, glyph: &'static str, page: Page| {
+            let active = self.page == page;
+            button(
+                row![
+                    container(t(glyph).size(13).color(WHITE)).width(26).height(26).center_x(26).center_y(26).style(
+                        move |_| icon_tile(if page == Page::Convert { FORGE } else { TIDE })
+                    ),
+                    t(label).size(14).font(MEDIUM).color(if active { WHITE } else { TEXT_2 }),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([7, 8])
+            .on_press(Message::Nav(page))
+            .style(move |_, s| nav_button(active, s))
+        };
+        let logo = row![
+            container(t("B").size(16).font(BOLD).color(WHITE)).width(30).height(30).center_x(30).center_y(30).style(|_| logo_tile()),
+            column![t("Blacksmith").size(15).font(BOLD).color(WHITE), t("VST2 → VST3").size(11).color(TEXT_3)],
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        container(
+            column![
+                logo,
+                Space::new().height(22),
+                nav("转换工程", "⇄", Page::Convert),
+                nav("官方支持", "✓", Page::Supported),
+                Space::new().height(Length::Fill),
+                t("FL Studio · .flp").size(11).color(TEXT_3),
+            ]
+            .spacing(4),
+        )
+        .width(210)
+        .height(Length::Fill)
+        .padding(Padding { top: 22.0, right: 14.0, bottom: 18.0, left: 14.0 })
+        .style(|_| sidebar())
+        .into()
+    }
+
+    /// Empty state: a big glowing drop target and the round action button.
+    fn welcome(&self) -> Element<'_, Message> {
+        let h = self.hovering;
+        let ring = |size: f32, alpha: f32, delay: f32| {
+            let size = size * self.orb_scale(delay);
+            container(Space::new()).width(size).height(size).style(move |_| ring(size, alpha * if h { 1.8 } else { 1.0 }))
+        };
+        let d = 132.0 * self.orb_scale(0.0);
+        let core = container(t("↓").size(54.0 * d / 132.0).font(BOLD).color(WHITE))
+            .width(d)
+            .height(d)
+            .center_x(d)
+            .center_y(d)
+            .style(move |_| orb(d, h));
+        let hero = stack![
+            center(ring(300.0, 0.05, 0.16)),
+            center(ring(236.0, 0.08, 0.10)),
+            center(ring(178.0, 0.12, 0.05)),
+            center(core),
+        ]
+        .width(360)
+        .height(360);
+
+        column![
+            Space::new().height(28),
+            t("给你的工程换上 VST3").size(30).font(BOLD).color(WHITE),
+            t(if h { "松手即可分析" } else { "把 FL Studio 工程（.flp）拖进窗口，先看插件清单，再决定转换" }).size(14).color(TEXT_2),
+            Space::new().height(Length::Fill),
+            hero,
+            Space::new().height(Length::Fill),
+            big_button("选择", Some(Message::Browse), self.cta_scale()),
+            t("原文件不会被改动，转换结果另存在旁边").size(12).color(TEXT_3),
+            Space::new().height(26),
+        ]
+        .spacing(8)
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+    }
+
+    fn projects(&self) -> Element<'_, Message> {
+        let ready = self.ready();
+        let done = self.items.iter().filter(|i| matches!(i.state, State::Done { .. })).count();
+        let (title, subtitle) = match (ready, done) {
+            (0, 0) => ("没有可转换的插件".to_string(), "这些工程里没有能升级的 VST2 插件".to_string()),
+            (0, d) => ("转换完成".to_string(), format!("{d} 个工程已另存为 VST3 版本")),
+            (r, _) => (format!("{r} 个插件可以升级"), format!("{} 个工程 · 确认清单后点「转换」", self.items.len())),
+        };
+
+        let mut cards = Column::new().spacing(12).padding(Padding { right: 12.0, ..Padding::ZERO });
+        for (i, item) in self.items.iter().enumerate() {
+            cards = cards.push(self.card(i, item));
+        }
+        cards = cards.push(container(t("拖入更多 .flp 文件").size(12).color(TEXT_3)).center_x(Length::Fill).padding(6));
+
+        let action = if ready > 0 {
+            big_button("转换", Some(Message::Convert), self.cta_scale())
+        } else {
+            big_button("完成", None, self.cta_scale())
+        };
+        let footer = row![
+            container(link_button("清空", Message::Clear)).width(Length::Fill),
+            action,
+            container(link_button("添加文件…", Message::Browse)).width(Length::Fill).align_right(Length::Fill),
+        ]
+        .align_y(Alignment::Center);
+
+        column![
+            column![t(title).size(26).font(BOLD).color(WHITE), t(subtitle).size(13).color(TEXT_2)].spacing(4),
+            scrollable(cards)
+                .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
+                .height(Length::Fill),
+            footer,
+        ]
+        .spacing(16)
+        .padding(Padding { top: 30.0, right: 28.0, bottom: 22.0, left: 32.0 })
+        .into()
+    }
+
+    fn card<'a>(&self, index: usize, item: &'a Item) -> Element<'a, Message> {
+        let (a, slide) = self.reveal(item, 0);
+        let file = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = item.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        let (chip, tone) = match &item.state {
+            State::Ready { .. } => ("待转换", Tone::Blue),
+            State::Done { .. } => ("已转换", Tone::Green),
+            State::Nothing { .. } => ("无需转换", Tone::Grey),
+            State::Failed(_) => ("出错", Tone::Danger),
+        };
+        let remove = button(t("✕").size(12).color(fade(TEXT_3, a)))
+            .padding([2, 6])
+            .on_press(Message::Remove(index))
+            .style(|_, s| ghost_button(s));
+        let headline = match item.state {
+            State::Done { .. } => GREEN,
+            State::Failed(_) => DANGER,
+            _ => TEXT_2,
+        };
+        let mut body = column![
+            row![
+                container(t("FL").size(12).font(BOLD).color(WHITE)).width(34).height(34).center_x(34).center_y(34).style(
+                    move |_| fade_tile(icon_tile(FORGE), a)
+                ),
+                column![
+                    t(file).size(15).font(SEMIBOLD).color(fade(WHITE, a)),
+                    t(dir).size(11).color(fade(TEXT_3, a)),
+                ]
+                .spacing(1)
+                .width(Length::Fill),
+                pill(chip, tone, a),
+                remove,
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            t(item.state.headline()).size(12).color(fade(headline, a)),
+        ]
+        .spacing(8);
+
+        let groups = item.state.groups();
+        if !groups.is_empty() {
+            let mut list = Column::new().spacing(5);
+            for (i, (name, how, count)) in groups.iter().enumerate() {
+                let (a, k) = self.reveal(item, i + 1);
+                let (label, tone) = badge(how);
+                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(WHITE, a))].spacing(6).align_y(Alignment::Center);
+                if *count > 1 {
+                    left = left.push(t(format!("×{count}")).size(12).color(fade(TEXT_3, a)));
+                }
+                list = list.push(
+                    container(
+                        row![left, Space::new().width(Length::Fill), pill(label, tone, a)]
+                            .align_y(Alignment::Center)
+                            .padding(Padding { left: 12.0 + 22.0 * (1.0 - k), ..Padding::from([7, 12]) }),
+                    )
+                    .style(move |_| row_style(a)),
+                );
+            }
+            body = body.push(list);
+        } else if !matches!(item.state, State::Failed(_)) {
+            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(TEXT_3, a)));
+        }
+        if let State::Done { out, .. } = &item.state {
+            body = body.push(row![Space::new().width(Length::Fill), glass_button("在文件夹中显示", Message::Reveal(out.clone()))]);
+        }
+        // Card drops in from slightly below with a springy settle.
+        let lift = 18.0 * (1.0 - slide);
+        container(container(body).padding(16).width(Length::Fill).style(move |_| glass(a)))
+            .padding(Padding { top: lift.max(0.0), bottom: (-lift).max(0.0), ..Padding::ZERO })
             .into()
     }
 
-    fn supported_list(&self, p: &'static Palette) -> Element<'_, Message> {
-        let section = |title: &'static str| t(title).size(12).font(SEMIBOLD).color(p.text_2);
-        let mut rules = Column::new().spacing(6);
+    fn supported(&self) -> Element<'_, Message> {
+        let mut rules = Column::new().spacing(10);
         for r in plugins::RULES {
             rules = rules.push(
                 container(
-                    column![
-                        row![
-                            t(r.name).size(14).font(SEMIBOLD).color(p.text),
-                            t(r.vendor).size(12).color(p.text_2),
-                            Space::new().width(Length::Fill),
-                            pill("官方支持", Tone::Green, p, 1.0),
+                    row![
+                        container(t(&r.name[..1]).size(16).font(BOLD).color(WHITE)).width(40).height(40).center_x(40).center_y(40).style(
+                            |_| icon_tile(TIDE)
+                        ),
+                        column![
+                            row![t(r.name).size(15).font(SEMIBOLD).color(WHITE), t(r.vendor).size(12).color(TEXT_3)]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                            t(r.note).size(12).color(TEXT_2),
                         ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                        t(r.note).size(12).color(p.text_3),
+                        .spacing(3)
+                        .width(Length::Fill),
+                        pill("官方支持", Tone::Green, 1.0),
                     ]
-                    .spacing(3),
+                    .spacing(12)
+                    .align_y(Alignment::Center),
                 )
-                .padding([9, 12])
-                .width(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(Background::Color(p.line)),
-                    border: Border { radius: Radius::from(8.0), ..Default::default() },
-                    ..Default::default()
-                }),
+                .padding(14)
+                .style(|_| glass(1.0)),
             );
         }
 
@@ -403,313 +621,36 @@ impl App {
             (How::AlreadyVst3, "已经是 VST3，不动"),
             (How::Skipped(String::new()), "无法转换，原样保留 VST2"),
         ];
-        let mut explain = Column::new().spacing(8);
+        let mut explain = Column::new().spacing(10);
         for (how, text) in legend {
             let (label, tone) = badge(&how);
             explain = explain.push(
                 row![
-                    container(pill(label.trim_end_matches(" · ").to_string(), tone, p, 1.0)).width(150),
-                    t(text).size(12).color(p.text_2).width(Length::Fill),
+                    container(pill(label.trim_end_matches(" · ").to_string(), tone, 1.0)).width(160),
+                    t(text).size(12).color(TEXT_2).width(Length::Fill),
                 ]
                 .align_y(Alignment::Center),
             );
         }
 
-        let body = column![
-            section("官方支持的插件"),
-            rules,
-            Space::new().height(10),
-            section("标签说明"),
-            explain,
-            Space::new().height(6),
-            t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(11).color(p.text_3),
-        ]
-        .spacing(8);
         scrollable(
-            container(body).padding(16).width(Length::Fill).style(move |_| container::Style {
-                background: Some(Background::Color(p.panel)),
-                border: Border { color: p.border, width: 1.0, radius: Radius::from(12.0) },
-                ..Default::default()
-            }),
-        )
-        .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4).spacing(6)))
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn empty(&self, p: &'static Palette) -> Element<'_, Message> {
-        let (border, bg) = if self.hovering { (p.accent, p.hover) } else { (p.border, p.panel) };
-        container(center(
             column![
-                container(t("⇣").size(26).color(p.text_2)).padding([6, 16]).style(move |_| container::Style {
-                    background: Some(Background::Color(p.line)),
-                    border: Border { radius: Radius::from(12.0), ..Default::default() },
-                    ..Default::default()
-                }),
-                Space::new().height(6),
-                t("把 .flp 文件拖到这里").size(18).font(SEMIBOLD).color(p.text),
-                t("先列出工程里的插件，确认后再转换").size(13).color(p.text_2),
-                t("转换后的工程另存在原文件旁边，原文件不动").size(12).color(p.text_3),
+                column![
+                    t("官方支持的插件").size(26).font(BOLD).color(WHITE),
+                    t("这些插件有专门的转换规则，音色和设置会原样迁移").size(13).color(TEXT_2),
+                ]
+                .spacing(4),
+                rules,
+                Space::new().height(8),
+                t("标签说明").size(15).font(SEMIBOLD).color(WHITE),
+                container(explain).padding(16).style(|_| glass(1.0)),
+                t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(12).color(TEXT_3),
             ]
-            .spacing(6)
-            .align_x(Alignment::Center),
-        ))
-        .width(Length::Fill)
+            .spacing(14)
+            .padding(Padding { top: 30.0, right: 40.0, bottom: 24.0, left: 32.0 }),
+        )
+        .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
         .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(bg)),
-            border: Border { color: border, width: 1.5, radius: Radius::from(14.0) },
-            ..Default::default()
-        })
         .into()
     }
-
-    fn card<'a>(&self, index: usize, item: &'a Item, p: &'static Palette) -> Element<'a, Message> {
-        let a = self.reveal(item, 0);
-        let file = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let dir = item.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
-        let (chip, tone) = match &item.state {
-            State::Ready { .. } => ("待转换", Tone::Blue),
-            State::Done { .. } => ("已转换", Tone::Green),
-            State::Nothing { .. } => ("无需转换", Tone::Grey),
-            State::Failed(_) => ("出错", Tone::Danger),
-        };
-
-        let remove = button(t("✕").size(12).color(fade(p.text_3, a)))
-            .padding([2, 6])
-            .on_press(Message::Remove(index))
-            .style(move |_, s| button::Style {
-                background: (s == button::Status::Hovered).then_some(Background::Color(p.line)),
-                border: Border { radius: Radius::from(6.0), ..Default::default() },
-                ..Default::default()
-            });
-        let title = row![
-            t(file).size(15).font(SEMIBOLD).color(fade(p.text, a)),
-            Space::new().width(Length::Fill),
-            pill(chip, tone, p, a),
-            remove,
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        let headline_color = match item.state {
-            State::Done { .. } => p.green,
-            State::Failed(_) => p.danger,
-            _ => p.text_2,
-        };
-        let mut body = column![
-            title,
-            t(dir).size(11).color(fade(p.text_3, a)),
-            t(item.state.headline()).size(12).color(fade(headline_color, a)),
-        ]
-        .spacing(3);
-
-        let groups = item.state.groups();
-        if !groups.is_empty() {
-            let mut list = Column::new().spacing(4);
-            for (i, (name, how, count)) in groups.iter().enumerate() {
-                let a = self.reveal(item, i + 1);
-                let (label, tone) = badge(how);
-                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(p.text, a))].spacing(6).align_y(Alignment::Center);
-                if *count > 1 {
-                    left = left.push(t(format!("×{count}")).size(12).color(fade(p.text_2, a)));
-                }
-                let line = fade(p.line, a);
-                list = list.push(
-                    container(
-                        row![left, Space::new().width(Length::Fill), pill(label, tone, p, a)]
-                            .align_y(Alignment::Center)
-                            .padding(Padding { left: 10.0 + 12.0 * (1.0 - a), ..Padding::from([6, 10]) }),
-                    )
-                    .style(move |_| container::Style {
-                        background: Some(Background::Color(line)),
-                        border: Border { radius: Radius::from(8.0), ..Default::default() },
-                        ..Default::default()
-                    }),
-                );
-            }
-            body = body.push(Space::new().height(6)).push(list);
-        } else if !matches!(item.state, State::Failed(_)) {
-            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(p.text_3, a)));
-        }
-
-        if let State::Done { out, .. } = &item.state {
-            body = body.push(Space::new().height(4)).push(row![
-                Space::new().width(Length::Fill),
-                secondary(p, "在文件夹中显示", Some(Message::Reveal(out.clone()))),
-            ]);
-        }
-
-        let border = fade(p.border, a);
-        container(body)
-            .padding(14)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(Background::Color(p.panel)),
-                border: Border { color: border, width: 1.0, radius: Radius::from(12.0) },
-                ..Default::default()
-            })
-            .into()
-    }
 }
-
-// ------------------------------------------------------------------ widgets
-
-/// Text with full shaping, so Chinese and other scripts fall back to system fonts.
-fn t<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
-    text(s).shaping(Shaping::Advanced)
-}
-
-fn fade(c: Color, a: f32) -> Color {
-    Color { a: c.a * a, ..c }
-}
-
-fn pill<'a>(label: impl text::IntoFragment<'a>, tone: Tone, p: &'static Palette, a: f32) -> Element<'a, Message> {
-    let (fg, bg) = tone.colors(p);
-    container(t(label).size(11).font(MEDIUM).color(fade(fg, a)))
-        .padding([2, 9])
-        .style(move |_| container::Style {
-            background: Some(Background::Color(fade(bg, a))),
-            border: Border { radius: Radius::from(99.0), ..Default::default() },
-            ..Default::default()
-        })
-        .into()
-}
-
-fn primary<'a>(p: &'static Palette, label: impl text::IntoFragment<'a>, on: Option<Message>) -> Element<'a, Message> {
-    button(t(label).size(13).font(SEMIBOLD))
-        .padding([8, 18])
-        .on_press_maybe(on)
-        .style(move |_, s| {
-            let bg = match s {
-                button::Status::Hovered | button::Status::Pressed => p.accent_hover,
-                button::Status::Disabled => p.chip,
-                button::Status::Active => p.accent,
-            };
-            button::Style {
-                background: Some(Background::Color(bg)),
-                text_color: if s == button::Status::Disabled { p.text_3 } else { p.on_accent },
-                border: Border { radius: Radius::from(9.0), ..Default::default() },
-                shadow: Shadow::default(),
-                ..Default::default()
-            }
-        })
-        .into()
-}
-
-fn secondary<'a>(p: &'static Palette, label: impl text::IntoFragment<'a>, on: Option<Message>) -> Element<'a, Message> {
-    button(t(label).size(13).font(MEDIUM))
-        .padding([7, 14])
-        .on_press_maybe(on)
-        .style(move |_, s| button::Style {
-            background: Some(Background::Color(if s == button::Status::Hovered { p.hover } else { p.panel })),
-            text_color: p.text,
-            border: Border { color: p.border, width: 1.0, radius: Radius::from(9.0) },
-            ..Default::default()
-        })
-        .into()
-}
-
-const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
-const MEDIUM: Font = Font { weight: font::Weight::Medium, ..Font::DEFAULT };
-
-// ------------------------------------------------------------------ colours
-
-#[derive(Clone, Copy)]
-enum Tone {
-    Green,
-    Blue,
-    Grey,
-    Warn,
-    Danger,
-}
-
-impl Tone {
-    fn colors(self, p: &Palette) -> (Color, Color) {
-        match self {
-            Tone::Green => (p.green, p.green_bg),
-            Tone::Blue => (p.blue, p.blue_bg),
-            Tone::Grey => (p.text_2, p.chip),
-            Tone::Warn => (p.warn, p.warn_bg),
-            Tone::Danger => (p.danger, p.danger_bg),
-        }
-    }
-}
-
-struct Palette {
-    chrome: Color,
-    panel: Color,
-    hover: Color,
-    line: Color,
-    chip: Color,
-    border: Color,
-    accent: Color,
-    accent_hover: Color,
-    on_accent: Color,
-    text: Color,
-    text_2: Color,
-    text_3: Color,
-    green: Color,
-    green_bg: Color,
-    blue: Color,
-    blue_bg: Color,
-    warn: Color,
-    warn_bg: Color,
-    danger: Color,
-    danger_bg: Color,
-}
-
-const fn rgb(hex: u32) -> Color {
-    Color::from_rgb(
-        ((hex >> 16) & 0xff) as f32 / 255.0,
-        ((hex >> 8) & 0xff) as f32 / 255.0,
-        (hex & 0xff) as f32 / 255.0,
-    )
-}
-
-const LIGHT: Palette = Palette {
-    chrome: rgb(0xE7ECEC),
-    panel: rgb(0xFFFFFF),
-    hover: rgb(0xF6F7F8),
-    line: rgb(0xF5F6F7),
-    chip: rgb(0xE6E8EB),
-    border: rgb(0xDDE0E4),
-    accent: rgb(0x111317),
-    accent_hover: rgb(0x2A2D33),
-    on_accent: rgb(0xFFFFFF),
-    text: rgb(0x111317),
-    text_2: rgb(0x6B7280),
-    text_3: rgb(0x9CA3AF),
-    green: rgb(0x1F8A4C),
-    green_bg: rgb(0xE3F5EA),
-    blue: rgb(0x2563EB),
-    blue_bg: rgb(0xEAF1FE),
-    warn: rgb(0xB54708),
-    warn_bg: rgb(0xFEF0DC),
-    danger: rgb(0xB42318),
-    danger_bg: rgb(0xFDECEA),
-};
-
-const DARK: Palette = Palette {
-    chrome: rgb(0x18191C),
-    panel: rgb(0x222327),
-    hover: rgb(0x2A2C30),
-    line: rgb(0x2A2C30),
-    chip: rgb(0x34363B),
-    border: rgb(0x34373C),
-    accent: rgb(0xF2F3F5),
-    accent_hover: rgb(0xFFFFFF),
-    on_accent: rgb(0x111317),
-    text: rgb(0xECEDEF),
-    text_2: rgb(0xA1A5AD),
-    text_3: rgb(0x6E737B),
-    green: rgb(0x5FD38D),
-    green_bg: rgb(0x1C3326),
-    blue: rgb(0x8AB4FF),
-    blue_bg: rgb(0x1D2A44),
-    warn: rgb(0xF5B35C),
-    warn_bg: rgb(0x3A2C17),
-    danger: rgb(0xFF8A80),
-    danger_bg: rgb(0x3A1F1F),
-};
