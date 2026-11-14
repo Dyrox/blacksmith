@@ -15,10 +15,10 @@ use iced::border::Radius;
 use iced::theme::Mode;
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Shaping;
-use iced::widget::{Column, Space, Text, center, column, container, row, scrollable, text};
+use iced::widget::{Column, Space, Text, button, center, column, container, row, scrollable, text};
 use iced::{
-    Alignment, Background, Border, Color, Element, Event, Font, Length, Padding, Size, Subscription, Task, Theme, event,
-    font, system, window,
+    Alignment, Background, Border, Color, Element, Event, Font, Length, Padding, Shadow, Size, Subscription, Task,
+    Theme, event, font, system, window,
 };
 
 fn main() -> iced::Result {
@@ -26,9 +26,9 @@ fn main() -> iced::Result {
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if !files.is_empty() {
         for f in &files {
-            let r = process(f);
-            let list = r.groups.iter().map(|(n, h, c)| format!("{c}× {n} [{}]", badge(h).0)).collect::<Vec<_>>();
-            println!("{} {}  {}  {}", r.kind.glyph(), r.file, r.detail, list.join(", "));
+            let s = run(f, true);
+            let list = s.groups().iter().map(|(n, h, c)| format!("{c}× {n} [{}]", badge(h).0)).collect::<Vec<_>>();
+            println!("{}  {}  {}", f.display(), s.headline(), list.join(", "));
         }
         return Ok(());
     }
@@ -38,8 +38,8 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .theme(|app: &App| if app.dark { Theme::Dark } else { Theme::Light })
         .window(window::Settings {
-            size: Size::new(480.0, 400.0),
-            min_size: Some(Size::new(360.0, 280.0)),
+            size: Size::new(600.0, 560.0),
+            min_size: Some(Size::new(440.0, 380.0)),
             ..Default::default()
         })
         .run()
@@ -47,64 +47,69 @@ fn main() -> iced::Result {
 
 // ------------------------------------------------------------------ work
 
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Done,
-    Nothing,
-    Failed,
+type Groups = Vec<(String, How, usize)>;
+
+enum State {
+    /// Analysed; `n` instances will be converted when the user asks.
+    Ready { groups: Groups, n: usize },
+    Done { groups: Groups, out: PathBuf },
+    /// Nothing to convert (no VST2, or none convertible).
+    Nothing { groups: Groups, note: &'static str },
+    Failed(String),
 }
 
-impl Kind {
-    fn glyph(self) -> &'static str {
+impl State {
+    fn groups(&self) -> &[(String, How, usize)] {
         match self {
-            Kind::Done => "✓",
-            Kind::Nothing => "–",
-            Kind::Failed => "✕",
+            State::Ready { groups, .. } | State::Done { groups, .. } | State::Nothing { groups, .. } => groups,
+            State::Failed(_) => &[],
+        }
+    }
+
+    fn headline(&self) -> String {
+        match self {
+            State::Ready { n, .. } => format!("可转换 {n} 个插件"),
+            State::Done { out, .. } => format!("已另存为 {}", out.file_name().unwrap_or_default().to_string_lossy()),
+            State::Nothing { note, .. } => note.to_string(),
+            State::Failed(e) => e.clone(),
         }
     }
 }
 
-struct Outcome {
-    kind: Kind,
-    file: String,
-    detail: String,
-    /// Plugins in the project: (name, outcome, instances).
-    groups: Vec<(String, How, usize)>,
-}
-
-/// Upgrades one project and writes `<name> (VST3).flp` next to it.
+/// Analyses a project and, if `write`, saves `<name> (VST3).flp` next to it.
 /// The original is never touched.
-fn process(path: &Path) -> Outcome {
-    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let fail = |detail: String| Outcome { kind: Kind::Failed, file: file.clone(), detail, groups: Vec::new() };
+fn run(path: &Path, write: bool) -> State {
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp")) {
-        return fail("不是 .flp 文件".into());
+        return State::Failed("不是 .flp 文件".into());
     }
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) => return fail(format!("读取失败：{e}")),
+        Err(e) => return State::Failed(format!("读取失败：{e}")),
     };
     let mut project = match flp::Project::parse(&bytes) {
         Ok(p) if p.to_bytes() == bytes => p,
-        Ok(_) => return fail("无法无损读取这个工程".into()),
-        Err(e) => return fail(format!("无法读取：{e}")),
+        Ok(_) => return State::Failed("无法无损读取这个工程".into()),
+        Err(e) => return State::Failed(format!("无法读取：{e}")),
     };
     let report = convert::upgrade(&mut project);
     let groups = report.groups();
-    if report.converted() == 0 {
-        let detail = if report.items.iter().any(|(_, h)| matches!(h, How::Skipped(_))) {
+    let n = report.converted();
+    if n == 0 {
+        let note = if report.items.iter().any(|(_, h)| matches!(h, How::Skipped(_))) {
             "有 VST2 插件，但都无法转换"
         } else {
             "没有需要转换的 VST2 插件"
         };
-        return Outcome { kind: Kind::Nothing, file, detail: detail.into(), groups };
+        return State::Nothing { groups, note };
+    }
+    if !write {
+        return State::Ready { groups, n };
     }
     let out = output_path(path);
-    if let Err(e) = std::fs::write(&out, project.to_bytes()) {
-        return Outcome { groups, ..fail(format!("保存失败：{e}")) };
+    match std::fs::write(&out, project.to_bytes()) {
+        Ok(()) => State::Done { groups, out },
+        Err(e) => State::Failed(format!("保存失败：{e}")),
     }
-    let name = out.file_name().unwrap().to_string_lossy();
-    Outcome { kind: Kind::Done, file, detail: format!("已另存为 {name}"), groups }
 }
 
 fn output_path(path: &Path) -> PathBuf {
@@ -119,6 +124,16 @@ fn output_path(path: &Path) -> PathBuf {
     out
 }
 
+/// Opens the file manager with `path` selected.
+fn reveal_in_folder(path: &Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(Path::new("."))).spawn();
+}
+
 /// Label and colours for a plugin's outcome.
 fn badge(how: &How) -> (String, Tone) {
     match how {
@@ -131,12 +146,17 @@ fn badge(how: &How) -> (String, Tone) {
 
 // ------------------------------------------------------------------ app
 
+struct Item {
+    path: PathBuf,
+    state: State,
+    /// When this item (re)appeared; drives its reveal animation.
+    shown_at: Instant,
+}
+
 struct App {
     dark: bool,
     hovering: bool,
-    current: Option<Outcome>,
-    /// When `current` arrived, and the latest frame time (drives the reveal).
-    shown_at: Instant,
+    items: Vec<Item>,
     now: Instant,
 }
 
@@ -144,33 +164,82 @@ struct App {
 enum Message {
     Dropped(PathBuf),
     Hover(bool),
+    Browse,
+    Picked(Vec<PathBuf>),
+    Convert,
+    Clear,
+    Remove(usize),
+    Reveal(PathBuf),
     Theme(Mode),
     Focused,
     Frame(Instant),
 }
 
-/// Reveal animation: header first, then each row a beat later.
-const STAGGER: f32 = 0.07;
+/// Reveal animation: card header first, then each plugin row a beat later.
+const STAGGER: f32 = 0.06;
 const FADE: f32 = 0.28;
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let dark = platform::system_dark().unwrap_or(false);
-        let now = Instant::now();
+        let mut app = Self { dark, hovering: false, items: Vec::new(), now: Instant::now() };
         // Debug aid: BLACKSMITH_DROP=<file> behaves as if that file was dropped at launch.
-        let current = std::env::var_os("BLACKSMITH_DROP").map(|f| process(Path::new(&f)));
-        (Self { dark, hovering: false, current, shown_at: now, now }, system::theme().map(Message::Theme))
+        if let Some(f) = std::env::var_os("BLACKSMITH_DROP") {
+            app.add(PathBuf::from(f));
+        }
+        (app, system::theme().map(Message::Theme))
+    }
+
+    fn add(&mut self, path: PathBuf) {
+        let item = Item { state: run(&path, false), path, shown_at: Instant::now() };
+        // Dropping the same file again re-analyses it in place.
+        match self.items.iter_mut().find(|i| i.path == item.path) {
+            Some(existing) => *existing = item,
+            None => self.items.push(item),
+        }
+        self.now = Instant::now();
+    }
+
+    fn ready(&self) -> usize {
+        self.items.iter().filter_map(|i| if let State::Ready { n, .. } = i.state { Some(n) } else { None }).sum()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Dropped(path) => {
                 self.hovering = false;
-                self.current = Some(process(&path));
-                self.shown_at = Instant::now();
-                self.now = self.shown_at;
+                self.add(path);
             }
             Message::Hover(h) => self.hovering = h,
+            Message::Browse => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("选择 FL Studio 工程")
+                            .add_filter("FL Studio 工程", &["flp"])
+                            .pick_files()
+                            .await
+                            .map(|files| files.iter().map(|f| f.path().to_path_buf()).collect())
+                            .unwrap_or_default()
+                    },
+                    Message::Picked,
+                );
+            }
+            Message::Picked(paths) => paths.into_iter().for_each(|p| self.add(p)),
+            Message::Convert => {
+                for item in &mut self.items {
+                    if matches!(item.state, State::Ready { .. }) {
+                        item.state = run(&item.path, true);
+                    }
+                }
+            }
+            Message::Clear => self.items.clear(),
+            Message::Remove(i) => {
+                if i < self.items.len() {
+                    self.items.remove(i);
+                }
+            }
+            Message::Reveal(path) => reveal_in_folder(&path),
             Message::Theme(mode) => {
                 if platform::system_dark().is_none() {
                     self.dark = mode == Mode::Dark;
@@ -188,13 +257,15 @@ impl App {
     }
 
     fn animating(&self) -> bool {
-        let rows = self.current.as_ref().map_or(0, |c| c.groups.len()) as f32;
-        self.now.duration_since(self.shown_at) < Duration::from_secs_f32(FADE + STAGGER * (rows + 1.0) + 0.05)
+        self.items.iter().any(|i| {
+            let rows = i.state.groups().len() as f32;
+            self.now.duration_since(i.shown_at) < Duration::from_secs_f32(FADE + STAGGER * (rows + 1.0) + 0.05)
+        })
     }
 
-    /// 0 → 1 progress of the i-th element of the reveal (eased).
-    fn reveal(&self, i: usize) -> f32 {
-        let t = self.now.duration_since(self.shown_at).as_secs_f32() - STAGGER * i as f32;
+    /// 0 → 1 progress of the n-th element of an item's reveal (eased).
+    fn reveal(&self, item: &Item, n: usize) -> f32 {
+        let t = self.now.saturating_duration_since(item.shown_at).as_secs_f32() - STAGGER * n as f32;
         let x = (t / FADE).clamp(0.0, 1.0);
         1.0 - (1.0 - x).powi(3)
     }
@@ -211,102 +282,192 @@ impl App {
         Subscription::batch([events, system::theme_changes().map(Message::Theme), frames])
     }
 
+    // -------------------------------------------------------------- views
+
     fn view(&self) -> Element<'_, Message> {
         let p = if self.dark { &DARK } else { &LIGHT };
 
-        let body: Element<'_, Message> = match &self.current {
-            None => center(
-                column![
-                    t("拖入 .flp 文件").size(22).font(SEMIBOLD).color(p.text),
-                    t("VST2 → VST3，另存在原文件旁边").size(13).color(p.text_2),
-                ]
-                .spacing(6)
-                .align_x(Alignment::Center),
-            )
-            .into(),
-            Some(o) => self.result(o, p),
-        };
+        let header = row![
+            column![
+                t("Blacksmith").size(20).font(BOLD).color(p.text),
+                t("FL Studio 工程 · VST2 → VST3").size(12).color(p.text_2),
+            ]
+            .spacing(2),
+            Space::new().width(Length::Fill),
+            secondary(p, "选择文件…", Some(Message::Browse)),
+        ]
+        .align_y(Alignment::Center);
 
-        let (border, bg) = if self.hovering { (p.accent, p.hover) } else { (p.border, p.panel) };
-        let zone = container(body).padding(22).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(Background::Color(bg)),
-            border: Border { color: border, width: 1.5, radius: Radius::from(14.0) },
-            ..Default::default()
-        });
+        let content: Element<'_, Message> = if self.items.is_empty() {
+            self.empty(p)
+        } else {
+            let mut cards = Column::new().spacing(10);
+            for (i, item) in self.items.iter().enumerate() {
+                cards = cards.push(self.card(i, item, p));
+            }
+            cards = cards.push(
+                container(t("拖入更多 .flp 文件").size(12).color(p.text_3)).width(Length::Fill).center_x(Length::Fill).padding(8),
+            );
+            scrollable(cards)
+                .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4).spacing(6)))
+                .height(Length::Fill)
+                .into()
+        };
+        // The whole content area is the drop target; outline it while hovering.
+        let hovering = self.hovering;
+        let content = container(content).padding(if self.items.is_empty() { 0 } else { 2 }).height(Length::Fill).style(
+            move |_| container::Style {
+                border: Border {
+                    color: if hovering { p.accent } else { Color::TRANSPARENT },
+                    width: 1.5,
+                    radius: Radius::from(14.0),
+                },
+                ..Default::default()
+            },
+        );
+
+        let ready = self.ready();
+        let done = self.items.iter().filter(|i| matches!(i.state, State::Done { .. })).count();
+        let status = match (self.items.len(), ready, done) {
+            (0, ..) => String::new(),
+            (n, 0, 0) => format!("{n} 个工程 · 没有可转换的插件"),
+            (n, 0, d) => format!("{n} 个工程 · 已转换 {d} 个"),
+            (n, r, _) => format!("{n} 个工程 · {r} 个插件待转换"),
+        };
+        let mut actions = row![].spacing(8);
+        if !self.items.is_empty() {
+            actions = actions.push(secondary(p, "清空", Some(Message::Clear)));
+        }
+        let label = if ready > 0 { format!("转换 {ready} 个插件") } else { "转换".into() };
+        actions = actions.push(primary(p, label, (ready > 0).then_some(Message::Convert)));
+        let footer = row![t(status).size(12).color(p.text_2), Space::new().width(Length::Fill), actions].align_y(Alignment::Center);
+
         let chrome = p.chrome;
-        container(zone)
-            .padding(14)
+        container(column![header, content, footer].spacing(14))
+            .padding(18)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| container::Style { background: Some(Background::Color(chrome)), ..Default::default() })
             .into()
     }
 
-    fn result<'a>(&self, o: &'a Outcome, p: &'static Palette) -> Element<'a, Message> {
-        let a = self.reveal(0);
-        let status = match o.kind {
-            Kind::Done => p.green,
-            Kind::Nothing => p.text_2,
-            Kind::Failed => p.danger,
-        };
-        let header = column![
-            row![
-                t(o.kind.glyph()).size(16).color(fade(status, a)),
-                t(&o.file).size(16).font(SEMIBOLD).color(fade(p.text, a)),
+    fn empty(&self, p: &'static Palette) -> Element<'_, Message> {
+        let (border, bg) = if self.hovering { (p.accent, p.hover) } else { (p.border, p.panel) };
+        container(center(
+            column![
+                container(t("⇣").size(26).color(p.text_2)).padding([6, 16]).style(move |_| container::Style {
+                    background: Some(Background::Color(p.line)),
+                    border: Border { radius: Radius::from(12.0), ..Default::default() },
+                    ..Default::default()
+                }),
+                Space::new().height(6),
+                t("把 .flp 文件拖到这里").size(18).font(SEMIBOLD).color(p.text),
+                t("先列出工程里的插件，确认后再转换").size(13).color(p.text_2),
+                t("转换后的工程另存在原文件旁边，原文件不动").size(12).color(p.text_3),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            t(&o.detail).size(12).color(fade(p.text_2, a)),
+            .spacing(6)
+            .align_x(Alignment::Center),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bg)),
+            border: Border { color: border, width: 1.5, radius: Radius::from(14.0) },
+            ..Default::default()
+        })
+        .into()
+    }
+
+    fn card<'a>(&self, index: usize, item: &'a Item, p: &'static Palette) -> Element<'a, Message> {
+        let a = self.reveal(item, 0);
+        let file = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = item.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        let (chip, tone) = match &item.state {
+            State::Ready { .. } => ("待转换", Tone::Blue),
+            State::Done { .. } => ("已转换", Tone::Green),
+            State::Nothing { .. } => ("无需转换", Tone::Grey),
+            State::Failed(_) => ("出错", Tone::Danger),
+        };
+
+        let remove = button(t("✕").size(12).color(fade(p.text_3, a)))
+            .padding([2, 6])
+            .on_press(Message::Remove(index))
+            .style(move |_, s| button::Style {
+                background: (s == button::Status::Hovered).then_some(Background::Color(p.line)),
+                border: Border { radius: Radius::from(6.0), ..Default::default() },
+                ..Default::default()
+            });
+        let title = row![
+            t(file).size(15).font(SEMIBOLD).color(fade(p.text, a)),
+            Space::new().width(Length::Fill),
+            pill(chip, tone, p, a),
+            remove,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        let headline_color = match item.state {
+            State::Done { .. } => p.green,
+            State::Failed(_) => p.danger,
+            _ => p.text_2,
+        };
+        let mut body = column![
+            title,
+            t(dir).size(11).color(fade(p.text_3, a)),
+            t(item.state.headline()).size(12).color(fade(headline_color, a)),
         ]
         .spacing(3);
 
-        let mut list = Column::new().spacing(4);
-        for (i, (name, how, count)) in o.groups.iter().enumerate() {
-            let a = self.reveal(i + 1);
-            let (label, tone) = badge(how);
-            let (fg, bg) = tone.colors(p);
-            let mut left = row![t(name).size(14).font(MEDIUM).color(fade(p.text, a))].spacing(6).align_y(Alignment::Center);
-            if *count > 1 {
-                left = left.push(t(format!("×{count}")).size(12).color(fade(p.text_2, a)));
-            }
-            let pill = container(t(label).size(11).font(MEDIUM).color(fade(fg, a))).padding([2, 9]).style(move |_| {
-                container::Style {
-                    background: Some(Background::Color(fade(bg, a))),
-                    border: Border { radius: Radius::from(99.0), ..Default::default() },
-                    ..Default::default()
+        let groups = item.state.groups();
+        if !groups.is_empty() {
+            let mut list = Column::new().spacing(4);
+            for (i, (name, how, count)) in groups.iter().enumerate() {
+                let a = self.reveal(item, i + 1);
+                let (label, tone) = badge(how);
+                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(p.text, a))].spacing(6).align_y(Alignment::Center);
+                if *count > 1 {
+                    left = left.push(t(format!("×{count}")).size(12).color(fade(p.text_2, a)));
                 }
-            });
-            let line = fade(p.line, a);
-            list = list.push(
-                container(
-                    row![left, Space::new().width(Length::Fill), pill].align_y(Alignment::Center).padding(Padding {
-                        left: 10.0 + 12.0 * (1.0 - a), // slides in from the left
-                        ..Padding::from([7, 10])
+                let line = fade(p.line, a);
+                list = list.push(
+                    container(
+                        row![left, Space::new().width(Length::Fill), pill(label, tone, p, a)]
+                            .align_y(Alignment::Center)
+                            .padding(Padding { left: 10.0 + 12.0 * (1.0 - a), ..Padding::from([6, 10]) }),
+                    )
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(line)),
+                        border: Border { radius: Radius::from(8.0), ..Default::default() },
+                        ..Default::default()
                     }),
-                )
-                .style(move |_| container::Style {
-                    background: Some(Background::Color(line)),
-                    border: Border { radius: Radius::from(8.0), ..Default::default() },
-                    ..Default::default()
-                }),
-            );
-        }
-        if o.groups.is_empty() && o.kind != Kind::Failed {
-            list = list.push(t("工程里没有 VST 插件").size(13).color(fade(p.text_2, self.reveal(1))));
+                );
+            }
+            body = body.push(Space::new().height(6)).push(list);
+        } else if !matches!(item.state, State::Failed(_)) {
+            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(p.text_3, a)));
         }
 
-        column![
-            header,
-            Space::new().height(10),
-            scrollable(list)
-                .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4).spacing(6)))
-                .height(Length::Fill),
-            t("再拖入一个文件以继续").size(11).color(p.text_3),
-        ]
-        .spacing(6)
-        .into()
+        if let State::Done { out, .. } = &item.state {
+            body = body.push(Space::new().height(4)).push(row![
+                Space::new().width(Length::Fill),
+                secondary(p, "在文件夹中显示", Some(Message::Reveal(out.clone()))),
+            ]);
+        }
+
+        let border = fade(p.border, a);
+        container(body)
+            .padding(14)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(p.panel)),
+                border: Border { color: border, width: 1.0, radius: Radius::from(12.0) },
+                ..Default::default()
+            })
+            .into()
     }
 }
+
+// ------------------------------------------------------------------ widgets
 
 /// Text with full shaping, so Chinese and other scripts fall back to system fonts.
 fn t<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
@@ -317,6 +478,53 @@ fn fade(c: Color, a: f32) -> Color {
     Color { a: c.a * a, ..c }
 }
 
+fn pill<'a>(label: impl text::IntoFragment<'a>, tone: Tone, p: &'static Palette, a: f32) -> Element<'a, Message> {
+    let (fg, bg) = tone.colors(p);
+    container(t(label).size(11).font(MEDIUM).color(fade(fg, a)))
+        .padding([2, 9])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(fade(bg, a))),
+            border: Border { radius: Radius::from(99.0), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn primary<'a>(p: &'static Palette, label: impl text::IntoFragment<'a>, on: Option<Message>) -> Element<'a, Message> {
+    button(t(label).size(13).font(SEMIBOLD))
+        .padding([8, 18])
+        .on_press_maybe(on)
+        .style(move |_, s| {
+            let bg = match s {
+                button::Status::Hovered | button::Status::Pressed => p.accent_hover,
+                button::Status::Disabled => p.chip,
+                button::Status::Active => p.accent,
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: if s == button::Status::Disabled { p.text_3 } else { p.on_accent },
+                border: Border { radius: Radius::from(9.0), ..Default::default() },
+                shadow: Shadow::default(),
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn secondary<'a>(p: &'static Palette, label: impl text::IntoFragment<'a>, on: Option<Message>) -> Element<'a, Message> {
+    button(t(label).size(13).font(MEDIUM))
+        .padding([7, 14])
+        .on_press_maybe(on)
+        .style(move |_, s| button::Style {
+            background: Some(Background::Color(if s == button::Status::Hovered { p.hover } else { p.panel })),
+            text_color: p.text,
+            border: Border { color: p.border, width: 1.0, radius: Radius::from(9.0) },
+            ..Default::default()
+        })
+        .into()
+}
+
+const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
 const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
 const MEDIUM: Font = Font { weight: font::Weight::Medium, ..Font::DEFAULT };
 
@@ -328,6 +536,7 @@ enum Tone {
     Blue,
     Grey,
     Warn,
+    Danger,
 }
 
 impl Tone {
@@ -337,6 +546,7 @@ impl Tone {
             Tone::Blue => (p.blue, p.blue_bg),
             Tone::Grey => (p.text_2, p.chip),
             Tone::Warn => (p.warn, p.warn_bg),
+            Tone::Danger => (p.danger, p.danger_bg),
         }
     }
 }
@@ -349,6 +559,8 @@ struct Palette {
     chip: Color,
     border: Color,
     accent: Color,
+    accent_hover: Color,
+    on_accent: Color,
     text: Color,
     text_2: Color,
     text_3: Color,
@@ -359,6 +571,7 @@ struct Palette {
     warn: Color,
     warn_bg: Color,
     danger: Color,
+    danger_bg: Color,
 }
 
 const fn rgb(hex: u32) -> Color {
@@ -375,8 +588,10 @@ const LIGHT: Palette = Palette {
     hover: rgb(0xF6F7F8),
     line: rgb(0xF5F6F7),
     chip: rgb(0xE6E8EB),
-    border: rgb(0xD6DADE),
+    border: rgb(0xDDE0E4),
     accent: rgb(0x111317),
+    accent_hover: rgb(0x2A2D33),
+    on_accent: rgb(0xFFFFFF),
     text: rgb(0x111317),
     text_2: rgb(0x6B7280),
     text_3: rgb(0x9CA3AF),
@@ -387,6 +602,7 @@ const LIGHT: Palette = Palette {
     warn: rgb(0xB54708),
     warn_bg: rgb(0xFEF0DC),
     danger: rgb(0xB42318),
+    danger_bg: rgb(0xFDECEA),
 };
 
 const DARK: Palette = Palette {
@@ -395,8 +611,10 @@ const DARK: Palette = Palette {
     hover: rgb(0x2A2C30),
     line: rgb(0x2A2C30),
     chip: rgb(0x34363B),
-    border: rgb(0x3A3D43),
+    border: rgb(0x34373C),
     accent: rgb(0xF2F3F5),
+    accent_hover: rgb(0xFFFFFF),
+    on_accent: rgb(0x111317),
     text: rgb(0xECEDEF),
     text_2: rgb(0xA1A5AD),
     text_3: rgb(0x6E737B),
@@ -407,4 +625,5 @@ const DARK: Palette = Palette {
     warn: rgb(0xF5B35C),
     warn_bg: rgb(0x3A2C17),
     danger: rgb(0xFF8A80),
+    danger_bg: rgb(0x3A1F1F),
 };

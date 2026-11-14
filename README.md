@@ -4,7 +4,8 @@ Drop an FL Studio project in, get a copy with its VST2 plugins swapped for
 their VST3 versions — same sounds, same settings. The original is never
 touched: the result is saved next to it as `<name> (VST3).flp`.
 
-After a drop, Blacksmith lists every VST plugin in the project:
+Drop projects in (or use 选择文件…): Blacksmith first lists every VST plugin in
+each project, then writes the upgraded copies when you press 转换:
 
 | Badge     | Meaning |
 |-----------|---------|

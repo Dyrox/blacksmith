@@ -6,6 +6,7 @@ description = "Drop a DAW project in, get it back with VST2 plugins upgraded to 
 
 [dependencies]
 iced = "0.14"
+rfd = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
