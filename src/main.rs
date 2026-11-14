@@ -3,6 +3,7 @@
 
 mod convert;
 mod flp;
+mod platform;
 mod plugins;
 mod style;
 mod vst3;
@@ -12,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use convert::How;
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Column, Space, button, center, column, container, row, scrollable, stack};
-use iced::{Alignment, Element, Event, Length, Padding, Size, Subscription, Task, Theme, event, window};
+use iced::theme::Mode;
+use iced::widget::{Column, Space, button, center, column, container, row, scrollable};
+use iced::{Alignment, Element, Event, Length, Padding, Size, Subscription, Task, Theme, event, keyboard, system, window};
 use style::*;
 
 fn main() -> iced::Result {
@@ -31,10 +33,10 @@ fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("Blacksmith")
         .subscription(App::subscription)
-        .theme(|_: &App| Theme::Dark)
+        .theme(|app: &App| if app.dark { Theme::Dark } else { Theme::Light })
         .window(window::Settings {
-            size: Size::new(860.0, 600.0),
-            min_size: Some(Size::new(680.0, 480.0)),
+            size: Size::new(880.0, 620.0),
+            min_size: Some(Size::new(700.0, 480.0)),
             ..Default::default()
         })
         .run()
@@ -136,7 +138,7 @@ fn badge(how: &How) -> (String, Tone) {
         How::Generic { derived: false } => ("通用转换".into(), Tone::Blue),
         How::Generic { derived: true } => ("通用转换 · 推导 ID".into(), Tone::Blue),
         How::AlreadyVst3 => ("已是 VST3".into(), Tone::Grey),
-        How::Skipped(why) => (format!("跳过 · {why}"), Tone::Warn),
+        How::Skipped(why) => (format!("跳过 · {why}"), Tone::Amber),
     }
 }
 
@@ -156,18 +158,15 @@ struct Item {
 }
 
 struct App {
+    dark: bool,
     page: Page,
     hovering: bool,
     items: Vec<Item>,
     now: Instant,
-    /// Animation clocks: launch, last page switch, last drag-hover change,
-    /// last change to what the big button does.
+    /// Animation clocks: launch (first frame), last page switch, last drag-hover change.
     boot_at: Instant,
     page_at: Instant,
     hover_at: Instant,
-    cta_at: Instant,
-    /// The launch animation starts at the first rendered frame, not at boot,
-    /// so a slow GPU start doesn't eat it.
     started: bool,
 }
 
@@ -182,13 +181,15 @@ enum Message {
     Clear,
     Remove(usize),
     Reveal(PathBuf),
+    Theme(Mode),
+    Focused,
     Frame(Instant),
 }
 
-/// Reveal animation: card header first, then each plugin row a beat later.
-const STAGGER: f32 = 0.06;
-const FADE: f32 = 0.30;
-const SLIDE: f32 = 0.55;
+/// Reveal animation: card first, then each plugin row a beat later.
+const STAGGER: f32 = 0.05;
+const FADE: f32 = 0.25;
+const SLIDE: f32 = 0.5;
 
 fn ease_out_cubic(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
@@ -198,15 +199,20 @@ fn ease_out_cubic(x: f32) -> f32 {
 /// Overshoots past 1 and settles back: the "pop".
 fn ease_out_back(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
-    const C1: f32 = 1.9;
+    const C1: f32 = 1.7;
     const C3: f32 = C1 + 1.0;
     1.0 + C3 * (x - 1.0).powi(3) + C1 * (x - 1.0).powi(2)
 }
 
 impl App {
-    fn boot() -> Self {
+    fn boot() -> (Self, Task<Message>) {
+        // Debug aid: BLACKSMITH_DARK=1 forces the dark palette.
+        let forced = std::env::var("BLACKSMITH_DARK").is_ok();
+        let dark = forced || platform::system_dark().unwrap_or(false);
+        style::set_dark(dark);
         let now = Instant::now();
         let mut app = Self {
+            dark,
             page: Page::Convert,
             hovering: false,
             items: Vec::new(),
@@ -215,7 +221,6 @@ impl App {
             page_at: now,
             // As if the last hover ended long ago, so nothing swells at launch.
             hover_at: now.checked_sub(Duration::from_secs(10)).unwrap_or(now),
-            cta_at: now,
             started: false,
         };
         // Debug aids: BLACKSMITH_DROP=<file> acts as a drop at launch;
@@ -226,7 +231,7 @@ impl App {
         if std::env::var("BLACKSMITH_PAGE").as_deref() == Ok("supported") {
             app.page = Page::Supported;
         }
-        app
+        (app, if forced { Task::none() } else { system::theme().map(Message::Theme) })
     }
 
     fn add(&mut self, path: PathBuf) {
@@ -237,7 +242,6 @@ impl App {
             None => self.items.push(item),
         }
         self.go(Page::Convert);
-        self.cta_at = Instant::now();
         self.now = Instant::now();
     }
 
@@ -246,6 +250,11 @@ impl App {
             self.page = page;
             self.page_at = Instant::now();
         }
+    }
+
+    fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
+        style::set_dark(dark);
     }
 
     /// Seconds since `at`, on the animation clock.
@@ -297,13 +306,12 @@ impl App {
                         item.shown_at = now; // pop the updated card in again
                     }
                 }
-                self.cta_at = now;
+                self.go(Page::Convert);
                 self.now = now;
             }
             Message::Clear => {
                 self.items.clear();
-                self.boot_at = Instant::now(); // replay the welcome pop
-                self.cta_at = self.boot_at;
+                self.boot_at = Instant::now(); // replay the drop-zone pop
                 self.now = self.boot_at;
             }
             Message::Remove(i) => {
@@ -312,11 +320,23 @@ impl App {
                 }
             }
             Message::Reveal(path) => reveal_in_folder(&path),
+            Message::Theme(mode) => {
+                if platform::system_dark().is_none() {
+                    self.set_dark(mode == Mode::Dark);
+                }
+            }
+            // macOS doesn't deliver appearance changes to the window; re-read on focus.
+            Message::Focused => {
+                if let Some(d) = platform::system_dark() {
+                    self.set_dark(d);
+                }
+            }
             Message::Frame(now) => {
+                // The launch animation starts at the first rendered frame, so a
+                // slow GPU start doesn't eat it.
                 if !self.started {
                     self.started = true;
                     self.boot_at = now;
-                    self.cta_at = now;
                     self.items.iter_mut().for_each(|i| i.shown_at = now);
                 }
                 self.now = now;
@@ -332,10 +352,9 @@ impl App {
         });
         !self.started
             || items
-            || self.since(self.boot_at) < 1.0
-            || self.since(self.page_at) < 0.7
-            || self.since(self.hover_at) < 0.7
-            || self.since(self.cta_at) < 0.7
+            || self.since(self.boot_at) < 0.8
+            || self.since(self.page_at) < 0.6
+            || self.since(self.hover_at) < 0.6
     }
 
     /// The n-th element of an item's reveal: (opacity, springy slide progress).
@@ -344,22 +363,17 @@ impl App {
         (ease_out_cubic(t / FADE), ease_out_back(t / SLIDE))
     }
 
-    /// Scale of the welcome orb: pops in at launch, swells while a file hovers.
-    fn orb_scale(&self, delay: f32) -> f32 {
-        let pop = 0.55 + 0.45 * ease_out_back((self.since(self.boot_at) - delay) / 0.7);
-        let k = ease_out_back(self.since(self.hover_at) / 0.55);
-        let swell = if self.hovering { 1.0 + 0.14 * k } else { 1.14 - 0.14 * k };
+    /// Scale of the drop-zone icon: pops in at launch, swells while a file hovers.
+    fn icon_scale(&self) -> f32 {
+        let pop = 0.6 + 0.4 * ease_out_back(self.since(self.boot_at) / 0.6);
+        let k = ease_out_back(self.since(self.hover_at) / 0.45);
+        let swell = if self.hovering { 1.0 + 0.18 * k } else { 1.18 - 0.18 * k };
         pop * swell
     }
 
-    /// Scale of the big round button: pops whenever what it does changes.
-    fn cta_scale(&self) -> f32 {
-        0.7 + 0.3 * ease_out_back(self.since(self.cta_at) / 0.55)
-    }
-
-    /// Extra left offset of the page content while it slides in.
+    /// Extra top offset of page content while it slides in.
     fn page_offset(&self) -> f32 {
-        36.0 * (1.0 - ease_out_back(self.since(self.page_at) / 0.6))
+        16.0 * (1.0 - ease_out_back(self.since(self.page_at) / 0.45))
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -367,155 +381,186 @@ impl App {
             Event::Window(window::Event::FileDropped(p)) => Some(Message::Dropped(p)),
             Event::Window(window::Event::FileHovered(_)) => Some(Message::Hover(true)),
             Event::Window(window::Event::FilesHoveredLeft) => Some(Message::Hover(false)),
+            Event::Window(window::Event::Focused) => Some(Message::Focused),
+            // Ctrl/⌘+O adds files, Ctrl/⌘+Enter converts.
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() => match key.as_ref() {
+                keyboard::Key::Character("o") => Some(Message::Browse),
+                keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::Convert),
+                _ => None,
+            },
             _ => None,
         });
         let frames = if self.animating() { window::frames().map(Message::Frame) } else { Subscription::none() };
-        Subscription::batch([events, frames])
+        Subscription::batch([events, system::theme_changes().map(Message::Theme), frames])
     }
 
     // -------------------------------------------------------------- views
 
     fn view(&self) -> Element<'_, Message> {
-        let main = match self.page {
-            Page::Convert if self.items.is_empty() => self.welcome(),
-            Page::Convert => self.projects(),
-            Page::Supported => self.supported(),
+        let page = match self.page {
+            Page::Convert => self.convert_page(),
+            Page::Supported => self.supported_page(),
         };
-        let backdrop = match self.page {
-            Page::Convert => FORGE,
-            Page::Supported => TIDE,
-        };
-        let hovering = self.hovering;
-        let main = container(container(main).padding(Padding { left: self.page_offset().max(-6.0), ..Padding::ZERO }))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| backdrop_style(backdrop, hovering));
-        row![self.sidebar(), main].into()
+        let off = self.page_offset();
+        let page = container(page).padding(Padding { top: off.max(0.0), bottom: (-off).max(0.0), ..Padding::ZERO });
+        row![
+            self.sidebar(),
+            container(page).width(Length::Fill).height(Length::Fill).padding([24, 28]).style(|_| background()),
+        ]
+        .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let nav = |label: &'static str, glyph: &'static str, page: Page| {
+        let p = p();
+        let nav_item = |label: &'static str, glyph: &'static str, page: Page, count: usize| {
             let active = self.page == page;
-            button(
-                row![
-                    container(t(glyph).size(13).color(WHITE)).width(26).height(26).center_x(26).center_y(26).style(
-                        move |_| icon_tile(if page == Page::Convert { FORGE } else { TIDE })
-                    ),
-                    t(label).size(14).font(MEDIUM).color(if active { WHITE } else { TEXT_2 }),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([7, 8])
-            .on_press(Message::Nav(page))
-            .style(move |_, s| nav_button(active, s))
+            let mut line = row![
+                container(t(glyph).size(13).color(if active { p.accent } else { p.text_2 }))
+                    .width(24)
+                    .center_x(24),
+                t(label).size(14).font(if active { SEMIBOLD } else { MEDIUM }).color(if active { p.text } else { p.text_2 }),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if count > 0 {
+                line = line.push(
+                    container(t(count.to_string()).size(11).font(SEMIBOLD).color(if active { p.on_accent } else { p.text_2 }))
+                        .padding([1, 7])
+                        .style(move |_| count_badge(active)),
+                );
+            }
+            button(line).width(Length::Fill).padding([9, 10]).on_press(Message::Nav(page)).style(move |_, s| nav(active, s))
         };
-        let logo = row![
-            container(t("B").size(16).font(BOLD).color(WHITE)).width(30).height(30).center_x(30).center_y(30).style(|_| logo_tile()),
-            column![t("Blacksmith").size(15).font(BOLD).color(WHITE), t("VST2 → VST3").size(11).color(TEXT_3)],
+        let logo_row = row![
+            container(t("B").size(15).font(BOLD).color(p.panel)).width(30).height(30).center_x(30).center_y(30).style(|_| logo()),
+            column![t("Blacksmith").size(15).font(BOLD).color(p.text), t("VST2 → VST3").size(11).color(p.text_3)],
         ]
         .spacing(10)
         .align_y(Alignment::Center);
+        let shortcut = |keys: &'static str, what: &'static str| {
+            row![t(keys).size(11).font(MEDIUM).color(p.text_2), Space::new().width(Length::Fill), t(what).size(11).color(p.text_3)]
+        };
+        let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 
         container(
             column![
-                logo,
-                Space::new().height(22),
-                nav("转换工程", "⇄", Page::Convert),
-                nav("官方支持", "✓", Page::Supported),
+                logo_row,
+                Space::new().height(20),
+                nav_item("转换工程", "⇄", Page::Convert, self.items.len()),
+                nav_item("官方支持", "✓", Page::Supported, plugins::RULES.len()),
                 Space::new().height(Length::Fill),
-                t("FL Studio · .flp").size(11).color(TEXT_3),
+                shortcut(if cfg!(target_os = "macos") { "⌘ O" } else { "Ctrl O" }, "添加文件"),
+                shortcut(if cmd == "⌘" { "⌘ ↵" } else { "Ctrl ↵" }, "转换"),
+                Space::new().height(6),
+                t("FL Studio · .flp").size(11).color(p.text_3),
             ]
             .spacing(4),
         )
-        .width(210)
+        .width(220)
         .height(Length::Fill)
-        .padding(Padding { top: 22.0, right: 14.0, bottom: 18.0, left: 14.0 })
+        .padding(Padding { top: 20.0, right: 12.0, bottom: 16.0, left: 12.0 })
         .style(|_| sidebar())
         .into()
     }
 
-    /// Empty state: a big glowing drop target and the round action button.
-    fn welcome(&self) -> Element<'_, Message> {
-        let h = self.hovering;
-        let ring = |size: f32, alpha: f32, delay: f32| {
-            let size = size * self.orb_scale(delay);
-            container(Space::new()).width(size).height(size).style(move |_| ring(size, alpha * if h { 1.8 } else { 1.0 }))
-        };
-        let d = 132.0 * self.orb_scale(0.0);
-        let core = container(t("↓").size(54.0 * d / 132.0).font(BOLD).color(WHITE))
-            .width(d)
-            .height(d)
-            .center_x(d)
-            .center_y(d)
-            .style(move |_| orb(d, h));
-        let hero = stack![
-            center(ring(300.0, 0.05, 0.16)),
-            center(ring(236.0, 0.08, 0.10)),
-            center(ring(178.0, 0.12, 0.05)),
-            center(core),
+    fn header<'a>(&self, title: String, subtitle: String, action: Option<Element<'a, Message>>) -> Element<'a, Message> {
+        let p = p();
+        let mut r = row![
+            column![t(title).size(22).font(BOLD).color(p.text), t(subtitle).size(13).color(p.text_2)]
+                .spacing(3)
+                .width(Length::Fill),
         ]
-        .width(360)
-        .height(360);
-
-        column![
-            Space::new().height(28),
-            t("给你的工程换上 VST3").size(30).font(BOLD).color(WHITE),
-            t(if h { "松手即可分析" } else { "把 FL Studio 工程（.flp）拖进窗口，先看插件清单，再决定转换" }).size(14).color(TEXT_2),
-            Space::new().height(Length::Fill),
-            hero,
-            Space::new().height(Length::Fill),
-            big_button("选择", Some(Message::Browse), self.cta_scale()),
-            t("原文件不会被改动，转换结果另存在旁边").size(12).color(TEXT_3),
-            Space::new().height(26),
-        ]
-        .spacing(8)
-        .align_x(Alignment::Center)
-        .width(Length::Fill)
-        .into()
+        .align_y(Alignment::Center);
+        if let Some(a) = action {
+            r = r.push(a);
+        }
+        r.into()
     }
 
-    fn projects(&self) -> Element<'_, Message> {
+    fn convert_page(&self) -> Element<'_, Message> {
+        let p = p();
+        let add = button(t("添加文件…").size(13).font(MEDIUM)).padding([9, 16]).on_press(Message::Browse).style(|_, s| secondary(s));
+
+        if self.items.is_empty() {
+            let h = self.hovering;
+            let d = 76.0 * self.icon_scale();
+            let icon = container(t("↓").size(34.0 * d / 76.0).font(BOLD).color(if h { p.on_accent } else { p.accent }))
+                .width(d)
+                .height(d)
+                .center_x(d)
+                .center_y(d)
+                .style(move |_| icon_circle(d, h));
+            let zone = container(center(
+                column![
+                    container(icon).width(110).height(110).center_x(110).center_y(110),
+                    t(if h { "松开即可分析" } else { "把 .flp 文件拖到这里" }).size(18).font(SEMIBOLD).color(p.text),
+                    t("先列出工程里的插件，确认后再转换。原文件不会被改动。").size(13).color(p.text_2),
+                    Space::new().height(10),
+                    button(t("选择文件…").size(14).font(SEMIBOLD))
+                        .padding([11, 22])
+                        .on_press(Message::Browse)
+                        .style(|_, s| primary(s)),
+                ]
+                .spacing(6)
+                .align_x(Alignment::Center),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| drop_zone(h));
+            return column![
+                self.header("转换工程".into(), "FL Studio 工程里的 VST2 插件换成 VST3".into(), None),
+                zone,
+            ]
+            .spacing(18)
+            .into();
+        }
+
         let ready = self.ready();
         let done = self.items.iter().filter(|i| matches!(i.state, State::Done { .. })).count();
-        let (title, subtitle) = match (ready, done) {
-            (0, 0) => ("没有可转换的插件".to_string(), "这些工程里没有能升级的 VST2 插件".to_string()),
-            (0, d) => ("转换完成".to_string(), format!("{d} 个工程已另存为 VST3 版本")),
-            (r, _) => (format!("{r} 个插件可以升级"), format!("{} 个工程 · 确认清单后点「转换」", self.items.len())),
+        let subtitle = match (ready, done) {
+            (0, 0) => "这些工程里没有能升级的 VST2 插件".to_string(),
+            (0, d) => format!("已转换 {d} 个工程，结果另存在原文件旁边"),
+            (r, _) => format!("{} 个工程 · {r} 个插件待转换", self.items.len()),
         };
 
         let mut cards = Column::new().spacing(12).padding(Padding { right: 12.0, ..Padding::ZERO });
         for (i, item) in self.items.iter().enumerate() {
             cards = cards.push(self.card(i, item));
         }
-        cards = cards.push(container(t("拖入更多 .flp 文件").size(12).color(TEXT_3)).center_x(Length::Fill).padding(6));
+        cards = cards.push(
+            container(t(if self.hovering { "松开即可添加" } else { "可以继续拖入 .flp 文件" }).size(12).color(if self.hovering {
+                p.accent
+            } else {
+                p.text_3
+            }))
+            .center_x(Length::Fill)
+            .padding(8),
+        );
 
-        let action = if ready > 0 {
-            big_button("转换", Some(Message::Convert), self.cta_scale())
-        } else {
-            big_button("完成", None, self.cta_scale())
-        };
+        let convert_label = if ready > 0 { format!("转换 {ready} 个插件") } else { "转换".into() };
         let footer = row![
-            container(link_button("清空", Message::Clear)).width(Length::Fill),
-            action,
-            container(link_button("添加文件…", Message::Browse)).width(Length::Fill).align_right(Length::Fill),
+            button(t("清空").size(13).font(MEDIUM)).padding([11, 14]).on_press(Message::Clear).style(|_, s| ghost(s)),
+            Space::new().width(Length::Fill),
+            button(t(convert_label).size(14).font(SEMIBOLD).center().width(Length::Fill))
+                .width(Length::Fixed(180.0))
+                .padding([11, 18])
+                .on_press_maybe((ready > 0).then_some(Message::Convert))
+                .style(|_, s| primary(s)),
         ]
         .align_y(Alignment::Center);
 
         column![
-            column![t(title).size(26).font(BOLD).color(WHITE), t(subtitle).size(13).color(TEXT_2)].spacing(4),
-            scrollable(cards)
-                .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
-                .height(Length::Fill),
+            self.header("转换工程".into(), subtitle, Some(add.into())),
+            scrollable(cards).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))).height(Length::Fill),
             footer,
         ]
         .spacing(16)
-        .padding(Padding { top: 30.0, right: 28.0, bottom: 22.0, left: 32.0 })
         .into()
     }
 
     fn card<'a>(&self, index: usize, item: &'a Item) -> Element<'a, Message> {
+        let p = p();
         let (a, slide) = self.reveal(item, 0);
         let file = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = item.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
@@ -523,28 +568,30 @@ impl App {
             State::Ready { .. } => ("待转换", Tone::Blue),
             State::Done { .. } => ("已转换", Tone::Green),
             State::Nothing { .. } => ("无需转换", Tone::Grey),
-            State::Failed(_) => ("出错", Tone::Danger),
+            State::Failed(_) => ("出错", Tone::Red),
         };
-        let remove = button(t("✕").size(12).color(fade(TEXT_3, a)))
-            .padding([2, 6])
+        let remove = button(t("✕").size(13).color(fade(p.text_3, a)).center())
+            .width(30)
+            .height(30)
+            .padding(0)
             .on_press(Message::Remove(index))
-            .style(|_, s| ghost_button(s));
+            .style(|_, s| ghost(s));
         let headline = match item.state {
-            State::Done { .. } => GREEN,
-            State::Failed(_) => DANGER,
-            _ => TEXT_2,
+            State::Done { .. } => p.green,
+            State::Failed(_) => p.red,
+            _ => p.text_2,
         };
         let mut body = column![
             row![
-                container(t("FL").size(12).font(BOLD).color(WHITE)).width(34).height(34).center_x(34).center_y(34).style(
-                    move |_| fade_tile(icon_tile(FORGE), a)
-                ),
-                column![
-                    t(file).size(15).font(SEMIBOLD).color(fade(WHITE, a)),
-                    t(dir).size(11).color(fade(TEXT_3, a)),
-                ]
-                .spacing(1)
-                .width(Length::Fill),
+                container(t("FL").size(12).font(BOLD).color(fade(p.accent, a)))
+                    .width(36)
+                    .height(36)
+                    .center_x(36)
+                    .center_y(36)
+                    .style(move |_| tile(a)),
+                column![t(file).size(15).font(SEMIBOLD).color(fade(p.text, a)), t(dir).size(11).color(fade(p.text_3, a))]
+                    .spacing(1)
+                    .width(Length::Fill),
                 pill(chip, tone, a),
                 remove,
             ]
@@ -556,51 +603,61 @@ impl App {
 
         let groups = item.state.groups();
         if !groups.is_empty() {
-            let mut list = Column::new().spacing(5);
+            let mut list = Column::new().spacing(4);
             for (i, (name, how, count)) in groups.iter().enumerate() {
                 let (a, k) = self.reveal(item, i + 1);
                 let (label, tone) = badge(how);
-                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(WHITE, a))].spacing(6).align_y(Alignment::Center);
+                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(p.text, a))].spacing(6).align_y(Alignment::Center);
                 if *count > 1 {
-                    left = left.push(t(format!("×{count}")).size(12).color(fade(TEXT_3, a)));
+                    left = left.push(t(format!("×{count}")).size(12).color(fade(p.text_3, a)));
                 }
                 list = list.push(
                     container(
                         row![left, Space::new().width(Length::Fill), pill(label, tone, a)]
                             .align_y(Alignment::Center)
-                            .padding(Padding { left: 12.0 + 22.0 * (1.0 - k), ..Padding::from([7, 12]) }),
+                            .padding(Padding { left: 12.0 + 20.0 * (1.0 - k), ..Padding::from([7, 12]) }),
                     )
                     .style(move |_| row_style(a)),
                 );
             }
             body = body.push(list);
         } else if !matches!(item.state, State::Failed(_)) {
-            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(TEXT_3, a)));
+            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(p.text_3, a)));
         }
         if let State::Done { out, .. } = &item.state {
-            body = body.push(row![Space::new().width(Length::Fill), glass_button("在文件夹中显示", Message::Reveal(out.clone()))]);
+            body = body.push(row![
+                Space::new().width(Length::Fill),
+                button(t("在文件夹中显示").size(13).font(MEDIUM))
+                    .padding([8, 14])
+                    .on_press(Message::Reveal(out.clone()))
+                    .style(|_, s| secondary(s)),
+            ]);
         }
-        // Card drops in from slightly below with a springy settle.
-        let lift = 18.0 * (1.0 - slide);
-        container(container(body).padding(16).width(Length::Fill).style(move |_| glass(a)))
+        // The card drops in from slightly below with a springy settle.
+        let lift = 16.0 * (1.0 - slide);
+        container(container(body).padding(16).width(Length::Fill).style(move |_| card(a)))
             .padding(Padding { top: lift.max(0.0), bottom: (-lift).max(0.0), ..Padding::ZERO })
             .into()
     }
 
-    fn supported(&self) -> Element<'_, Message> {
+    fn supported_page(&self) -> Element<'_, Message> {
+        let p = p();
         let mut rules = Column::new().spacing(10);
         for r in plugins::RULES {
             rules = rules.push(
                 container(
                     row![
-                        container(t(&r.name[..1]).size(16).font(BOLD).color(WHITE)).width(40).height(40).center_x(40).center_y(40).style(
-                            |_| icon_tile(TIDE)
-                        ),
+                        container(t(&r.name[..1]).size(16).font(BOLD).color(p.accent))
+                            .width(40)
+                            .height(40)
+                            .center_x(40)
+                            .center_y(40)
+                            .style(|_| tile(1.0)),
                         column![
-                            row![t(r.name).size(15).font(SEMIBOLD).color(WHITE), t(r.vendor).size(12).color(TEXT_3)]
+                            row![t(r.name).size(15).font(SEMIBOLD).color(p.text), t(r.vendor).size(12).color(p.text_3)]
                                 .spacing(8)
                                 .align_y(Alignment::Center),
-                            t(r.note).size(12).color(TEXT_2),
+                            t(r.note).size(12).color(p.text_2),
                         ]
                         .spacing(3)
                         .width(Length::Fill),
@@ -610,7 +667,7 @@ impl App {
                     .align_y(Alignment::Center),
                 )
                 .padding(14)
-                .style(|_| glass(1.0)),
+                .style(|_| card(1.0)),
             );
         }
 
@@ -627,30 +684,29 @@ impl App {
             explain = explain.push(
                 row![
                     container(pill(label.trim_end_matches(" · ").to_string(), tone, 1.0)).width(160),
-                    t(text).size(12).color(TEXT_2).width(Length::Fill),
+                    t(text).size(12).color(p.text_2).width(Length::Fill),
                 ]
                 .align_y(Alignment::Center),
             );
         }
 
-        scrollable(
-            column![
+        column![
+            self.header("官方支持".into(), "这些插件有专门的转换规则，音色和设置会原样迁移".into(), None),
+            scrollable(
                 column![
-                    t("官方支持的插件").size(26).font(BOLD).color(WHITE),
-                    t("这些插件有专门的转换规则，音色和设置会原样迁移").size(13).color(TEXT_2),
+                    rules,
+                    Space::new().height(6),
+                    t("标签说明").size(14).font(SEMIBOLD).color(p.text),
+                    container(explain).padding(16).style(|_| card(1.0)),
+                    t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(12).color(p.text_3),
                 ]
-                .spacing(4),
-                rules,
-                Space::new().height(8),
-                t("标签说明").size(15).font(SEMIBOLD).color(WHITE),
-                container(explain).padding(16).style(|_| glass(1.0)),
-                t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(12).color(TEXT_3),
-            ]
-            .spacing(14)
-            .padding(Padding { top: 30.0, right: 40.0, bottom: 24.0, left: 32.0 }),
-        )
-        .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
-        .height(Length::Fill)
+                .spacing(12)
+                .padding(Padding { right: 12.0, ..Padding::ZERO }),
+            )
+            .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
+            .height(Length::Fill),
+        ]
+        .spacing(18)
         .into()
     }
 }

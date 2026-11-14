@@ -276,6 +276,7 @@ name = "blacksmith"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "objc2-foundation 0.3.2",
  "rfd",
 ]
 
