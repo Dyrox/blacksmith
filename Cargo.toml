@@ -5,7 +5,7 @@ edition = "2024"
 description = "Drop a DAW project in, get it back with VST2 plugins upgraded to VST3."
 
 [dependencies]
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "thread-pool", "x11", "wayland"] }
+iced = "0.14"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
