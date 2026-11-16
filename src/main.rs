@@ -657,8 +657,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, b"").unwrap();
         }
-        let found: Vec<String> =
-            projects_in(vec![dir.clone()]).iter().map(|p| p.strip_prefix(&dir).unwrap().display().to_string()).collect();
+        // Compared with `/` on every OS (Windows paths use `\`).
+        let found: Vec<String> = projects_in(vec![dir.clone()])
+            .iter()
+            .map(|p| {
+                let rel = p.strip_prefix(&dir).unwrap();
+                rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
+            })
+            .collect();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(found, ["a/song.flp", "b/c/beat.FLP"]);
     }

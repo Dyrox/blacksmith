@@ -91,18 +91,6 @@ impl Report {
     pub fn converted(&self) -> usize {
         self.items.iter().filter(|(_, h)| matches!(h, How::Known(_) | How::Generic { .. } | How::Relinked(_) | How::Reidentified)).count()
     }
-
-    /// Instances grouped by (name, outcome), in project order, with counts.
-    pub fn groups(&self) -> Vec<(String, How, usize)> {
-        let mut out: Vec<(String, How, usize)> = Vec::new();
-        for (name, how) in &self.items {
-            match out.iter_mut().find(|(n, h, _)| n == name && h == how) {
-                Some((_, _, c)) => *c += 1,
-                None => out.push((name.clone(), how.clone(), 1)),
-            }
-        }
-        out
-    }
 }
 
 pub fn wrapper_version(data: &[u8]) -> Option<u32> {
