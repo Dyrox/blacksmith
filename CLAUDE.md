@@ -158,7 +158,7 @@ Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<f
 - Record 32 (I/O layout) differs (708 vs 384 bytes); the old one is kept.
 - Live: Kontakt VST3 → Kontakt 8 also verified by the owner in a set.
 - Kontakt **VST2** (`Ni$D`, Kontakt 5/6): its chunk is the same `hsin` container, so it goes to
-  Kontakt 8 as is (rule `Source::Vst2`, unverified). In a Live set the `<VstPluginInfo>` is rebuilt as a
+  Kontakt 8 as is (rule `Source::Vst2`; verified by the owner in Live sets, Nov 2026, not yet in FL). In a Live set the `<VstPluginInfo>` is rebuilt as a
   `<Vst3PluginInfo>` (`als::vst3_info_from_vst2`, modelled on a real Kontakt 8 block): window pos,
   on/off, overwrite number and preset Id carried over, `<Buffer>` text verbatim as
   `<ProcessorState>`, `<BranchDeviceId>` → `device:vst3:…`. Refused when any `<ParameterId>` in the
