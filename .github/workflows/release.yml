@@ -88,11 +88,12 @@ jobs:
           </dict></plist>
           PLIST
           codesign --force --deep --sign - "$APP"
-          cd dist && ditto -c -k --keepParent Blacksmith.app "Blacksmith-$VERSION-macos-universal.zip"
+      - name: Disk image
+        run: sh tools/dmg.sh dist/Blacksmith.app "dist/Blacksmith-$VERSION-macos-universal.dmg"
       - uses: actions/upload-artifact@v5
         with:
           name: macos
-          path: dist/*.zip
+          path: dist/*.dmg
 
   release:
     needs: [version, windows, macos]
@@ -122,7 +123,7 @@ jobs:
               echo
             fi
             echo "---"
-            echo "Not signed by Apple or Microsoft yet. macOS, first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway."
+            echo "Not signed by Apple or Microsoft yet. macOS: open the .dmg, drag Blacksmith to Applications; first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway."
           } > notes.md
           cat notes.md
       - uses: actions/download-artifact@v5
