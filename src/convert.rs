@@ -206,6 +206,19 @@ fn vst3_records(old: &[(u32, Vec<u8>)], target: &Target, component_state: Vec<u8
     out
 }
 
+/// 升级插件 from a VST2: the instance as another product's VST3, its chunk
+/// through `state`, the target's name. `None` for a parameter-based VST2.
+pub fn vst2_to_product(old: &[(u32, Vec<u8>)], target: &Target, state: fn(&[u8]) -> Option<Vec<u8>>, name: &str) -> Option<Records> {
+    let Vst2State::Chunk(chunk) = get(old, STATE).and_then(vst2_state)? else { return None };
+    let mut records = vst3_records(old, target, state(chunk)?, None);
+    for (id, d) in &mut records {
+        if *id == NAME {
+            *d = name.as_bytes().to_vec();
+        }
+    }
+    Some(records)
+}
+
 /// Wraps a VST2 chunk the way Cubase hands VST2 state to a VST3 plugin and
 /// the VST3 SDK's `tryVst2StateLoad` reads it: a `VstW` header followed by
 /// an FXB chunk bank. All big-endian.

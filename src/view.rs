@@ -3,7 +3,7 @@
 //! page below — steps to explain an empty page, tables once there's data.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Column, Space, button, center, checkbox, column, container, opaque, row, scrollable, stack, text_input};
+use iced::widget::{Column, Space, button, center, checkbox, column, container, opaque, row, scrollable, stack, svg, text_input};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::check::Format;
@@ -13,6 +13,9 @@ use crate::style::*;
 use crate::*;
 
 const BAR: f32 = 56.0;
+
+/// The logo (`assets/logo.svg`; the app icons are rendered from it by `tools/icons.sh`).
+const LOGO: &[u8] = include_bytes!("../assets/logo.svg");
 
 /// Row reveal: each table row a beat after the one above.
 const ROW_STAGGER: f32 = 0.025;
@@ -111,8 +114,8 @@ impl App {
         };
         let section = |label: &'static str| container(t(label).size(11).font(MEDIUM).color(p.text_3)).padding([8, 8]);
         let logo_row = row![
-            container(t("B").size(14).font(BOLD).color(p.panel)).width(28).height(28).center_x(28).center_y(28).style(|_| logo()),
-            column![t("Blacksmith").size(14).font(BOLD).color(p.text), t("FL Studio 工程检查").size(11).color(p.text_3)],
+            svg(svg::Handle::from_memory(LOGO)).width(30).height(30),
+            column![t("Blacksmith").size(14).font(BOLD).color(p.text), t("工程文件医生").size(11).color(p.text_3)],
         ]
         .spacing(10)
         .align_y(Alignment::Center);

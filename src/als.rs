@@ -30,6 +30,8 @@ struct Instance {
     /// Byte range of the `<…PluginInfo …>…</…PluginInfo>` block.
     start: usize,
     end: usize,
+    /// Byte range of its `<PluginDevice …>…</PluginDevice>`.
+    device: Option<(usize, usize)>,
 }
 
 impl Set {
@@ -109,7 +111,12 @@ fn instances(xml: &str) -> Vec<Instance> {
                     Plugin { format, id: id.to_vec(), name, vendor: String::new() }
                 }
             };
-            out.push(Instance { plugin, start, end });
+            let device = xml[..start].rfind("<PluginDevice ").and_then(|ds| {
+                let close = "</PluginDevice>";
+                let de = end + xml[end..].find(close)? + close.len();
+                (!xml[ds..start].contains(close)).then_some((ds, de))
+            });
+            out.push(Instance { plugin, start, end, device });
         }
     }
     out.sort_by_key(|i| i.start);
@@ -120,7 +127,8 @@ fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
     match plugin.format {
         Format::Vst2 => {
             let id = u32::from_be_bytes(plugin.id[..].try_into().unwrap());
-            (Status::Vst2 { installed: lib.vst2_installed(id) }, None)
+            let fix = upgrades::from_vst2(id).filter(|u| u.installed_in(lib)).map(|u| Fix::Migrate { to: u.to_name, verified: u.verified });
+            (Status::Vst2 { installed: lib.vst2_installed(id) }, fix)
         }
         Format::Vst3 => {
             let (status, fix) = if lib.is_installed(&plugin.id) {
@@ -132,7 +140,7 @@ fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
                 }
             };
             // A newer product that's installed here beats a rename.
-            match upgrades::from(&plugin.id).filter(|u| u.installed_in(lib)) {
+            match upgrades::from_vst3(&plugin.id).filter(|u| u.installed_in(lib)) {
                 Some(u) => (status, Some(Fix::Migrate { to: u.to_name, verified: u.verified })),
                 None => (status, fix),
             }
@@ -150,41 +158,161 @@ fn target_by_name<'a>(lib: &'a Library, plugin: &Plugin) -> Option<&'a Entry> {
 
 /// Every plugin the set uses, once per plugin with its instance count.
 pub fn analyse(lib: &Library, set: &Set) -> Vec<Finding> {
+    let all = instances(&set.xml);
     let mut out: Vec<Finding> = Vec::new();
-    for inst in instances(&set.xml) {
+    for inst in &all {
         if let Some(f) = out.iter_mut().find(|f| f.plugin == inst.plugin) {
             f.instances += 1;
             continue;
         }
         let (status, fix) = assess(lib, &inst.plugin);
-        out.push(Finding { plugin: inst.plugin, status, fix, instances: 1 });
+        out.push(Finding { plugin: inst.plugin.clone(), status, fix, instances: 1 });
+    }
+    // A VST2 is only moved when every instance can be.
+    for f in out.iter_mut().filter(|f| f.plugin.format == Format::Vst2) {
+        if all.iter().any(|i| i.plugin == f.plugin && !vst2_movable(&set.xml, i)) {
+            f.fix = None;
+        }
     }
     out
 }
 
-/// What a VST3 instance becomes under the choices.
+/// Whether a VST2 device can become a VST3 one: it has a device around it and
+/// a chunk, and none of its parameter slots is bound to a VST2 parameter (the
+/// VST3's parameters are numbered differently, so automation and mappings on
+/// them would point at the wrong controls).
+fn vst2_movable(xml: &str, inst: &Instance) -> bool {
+    let Some((ds, de)) = inst.device else { return false };
+    let device = &xml[ds..de];
+    let block = &xml[inst.start..inst.end];
+    block.contains("<Buffer>")
+        && device.match_indices("<ParameterId Value=\"").all(|(i, m)| device[i + m.len()..].starts_with("-1\""))
+}
+
+/// What an instance becomes under the choices.
 struct Change {
     class_id: [u8; 16],
     reset: bool,
     /// 升级插件: the new product's name and how its state converts.
     upgrade: Option<&'static upgrades::Upgrade>,
+    /// The instance is a VST2 that becomes the upgrade's VST3.
+    from_vst2: bool,
 }
 
 fn target(lib: &Library, plugin: &Plugin, choice: Option<Choice>) -> Option<Change> {
-    if plugin.format != Format::Vst3 {
-        return None;
-    }
     let (_, fix) = assess(lib, plugin);
     let decision = check::decide(fix.as_ref(), choice)?;
+    if plugin.format == Format::Vst2 {
+        // Only an upgrade moves a VST2 (no picks: its state needs a rule).
+        let u = upgrades::from_vst2(u32::from_be_bytes(plugin.id[..].try_into().ok()?))?;
+        return (decision.pick.is_none()).then_some(Change { class_id: u.to, reset: decision.reset, upgrade: Some(u), from_vst2: true });
+    }
     let (class_id, upgrade) = match (decision.pick, &fix) {
         (Some(id), _) => (id, None),
         (None, Some(Fix::Migrate { .. })) => {
-            let u = upgrades::from(&plugin.id)?;
+            let u = upgrades::from_vst3(&plugin.id)?;
             (u.to, Some(u))
         }
         (None, _) => (target_by_name(lib, plugin)?.class_id, None),
     };
-    Some(Change { class_id, reset: decision.reset, upgrade })
+    Some(Change { class_id, reset: decision.reset, upgrade, from_vst2: false })
+}
+
+/// The four `<Fields.N>` words of a class ID (as FL stores it), as Live writes them.
+fn uid_words(class_id: [u8; 16]) -> [i32; 4] {
+    let fuid = fuid_to_com(class_id); // the swap is its own inverse
+    std::array::from_fn(|i| u32::from_be_bytes(fuid[4 * i..4 * i + 4].try_into().unwrap()) as i32)
+}
+
+/// A `<VstPluginInfo>` block as the upgrade's `<Vst3PluginInfo>`: window
+/// position, on/off and overwrite number carried over, the chunk through the
+/// upgrade's conversion as `<ProcessorState>` (kept verbatim, line breaks and
+/// all, when the conversion leaves it as is).
+fn vst3_info_from_vst2(block: &str, up: &upgrades::Upgrade, reset: bool) -> Option<String> {
+    let val = |tag: &str, default: &'static str| value_of(block, tag).map_or(default.to_string(), |(_, v)| v.to_string());
+    let id = block.strip_prefix("<VstPluginInfo Id=\"").and_then(|r| r.split('"').next()).unwrap_or("0");
+    let preset_id = block.find("<VstPreset Id=\"").and_then(|i| block[i + 15..].split('"').next()).unwrap_or("0");
+    let (a, b) = (block.find("<Buffer>")? + "<Buffer>".len(), block.find("</Buffer>")?);
+    let text = &block[a..b];
+    let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let old: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect::<Option<_>>()?;
+    let new = (up.state)(&old)?;
+    let state = if reset {
+        "<ProcessorState />".to_string()
+    } else if new == old {
+        format!("<ProcessorState>{text}</ProcessorState>")
+    } else {
+        format!("<ProcessorState>{}</ProcessorState>", new.iter().map(|b| format!("{b:02X}")).collect::<String>())
+    };
+    let w = uid_words(up.to);
+    let uid = format!(
+        "<Uid>\n<Fields.0 Value=\"{}\" />\n<Fields.1 Value=\"{}\" />\n<Fields.2 Value=\"{}\" />\n<Fields.3 Value=\"{}\" />\n</Uid>",
+        w[0], w[1], w[2], w[3]
+    );
+    let (inputs, outputs, device_type) = up.live;
+    Some(format!(
+        r#"<Vst3PluginInfo Id="{id}">
+<WinPosX Value="{x}" />
+<WinPosY Value="{y}" />
+<NumAudioInputs Value="{inputs}" />
+<NumAudioOutputs Value="{outputs}" />
+<IsPlaceholderDevice Value="false" />
+<Preset>
+<Vst3Preset Id="{preset_id}">
+<OverwriteProtectionNumber Value="{opn}" />
+<MpeEnabled Value="0" />
+<MpeSettings>
+<ZoneType Value="0" />
+<FirstNoteChannel Value="1" />
+<LastNoteChannel Value="15" />
+</MpeSettings>
+<ParameterSettings />
+<IsOn Value="{on}" />
+<PowerMacroControlIndex Value="-1" />
+<PowerMacroMappingRange>
+<Min Value="64" />
+<Max Value="127" />
+</PowerMacroMappingRange>
+<IsFolded Value="false" />
+<StoredAllParameters Value="true" />
+<DeviceLomId Value="0" />
+<DeviceViewLomId Value="0" />
+<IsOnLomId Value="0" />
+<ParametersListWrapperLomId Value="0" />
+{uid}
+<DeviceType Value="{device_type}" />
+{state}
+<ControllerState />
+<Name Value="" />
+<PresetRef />
+</Vst3Preset>
+</Preset>
+<Name Value="{name}" />
+{uid}
+<DeviceType Value="{device_type}" />
+</Vst3PluginInfo>"#,
+        x = val("WinPosX", "0"),
+        y = val("WinPosY", "0"),
+        opn = val("OverwriteProtectionNumber", "3074"),
+        on = val("IsOn", "true"),
+        name = up.to_name,
+    ))
+}
+
+/// A device's `<BranchDeviceId>` (the browser's link to the plugin) pointed
+/// at the new VST3: `device:vst:<kind>:…` → `device:vst3:<kind>:<FUID>`.
+fn with_branch_id(device: &str, class_id: [u8; 16]) -> String {
+    let tag = "<BranchDeviceId Value=\"device:vst:";
+    let Some(i) = device.find(tag) else { return device.to_string() };
+    let at = i + tag.len();
+    let Some(len) = device[at..].find('"') else { return device.to_string() };
+    let kind = device[at..at + len].split(':').next().unwrap_or("instr");
+    let f = fuid_to_com(class_id);
+    let hex: String = f.iter().map(|b| format!("{b:02x}")).collect();
+    let fuid = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]);
+    let mut out = device.to_string();
+    out.replace_range(i..at + len, &format!("<BranchDeviceId Value=\"device:vst3:{kind}:{fuid}"));
+    out
 }
 
 /// `block` (a VST3 info) under another product: its info `<Name>` and its
@@ -250,6 +378,17 @@ pub fn apply(lib: &Library, set: &mut Set, choices: &Choices) -> usize {
     // Back to front, so earlier offsets stay valid.
     for inst in instances(&set.xml).into_iter().rev() {
         if let Some(change) = target(lib, &inst.plugin, choices.get(&inst.plugin).copied()) {
+            if change.from_vst2 {
+                let (Some(up), Some((ds, de))) = (change.upgrade, inst.device) else { continue };
+                if !vst2_movable(&set.xml, &inst) {
+                    continue;
+                }
+                let Some(info) = vst3_info_from_vst2(&set.xml[inst.start..inst.end], up, change.reset) else { continue };
+                let device = format!("{}{}{}", &set.xml[ds..inst.start], info, &set.xml[inst.end..de]);
+                set.xml.replace_range(ds..de, &with_branch_id(&device, up.to));
+                changed += 1;
+                continue;
+            }
             let block = with_uid(&set.xml[inst.start..inst.end], change.class_id);
             let block = match change.upgrade {
                 Some(up) => match upgraded(&block, up) {
@@ -354,12 +493,70 @@ mod tests {
 
     #[test]
     fn upgrade_renames_and_keeps_state() {
-        let up = upgrades::from(b"NTSV$ikDontakt\0\0").unwrap();
+        let up = upgrades::from_vst3(b"NTSV$ikDontakt\0\0").unwrap();
         let block = r#"<Vst3PluginInfo Id="0"><Preset><Vst3Preset Id="3"><ProcessorState>0A0B</ProcessorState><Name Value="" /></Vst3Preset></Preset><Name Value="Kontakt" /></Vst3PluginInfo>"#;
         let out = upgraded(block, up).unwrap();
         assert!(out.contains(r#"</Preset><Name Value="Kontakt 8" />"#));
         assert!(out.contains("<ProcessorState>0A0B</ProcessorState>"));
         assert!(out.contains(r#"<Vst3Preset Id="3"><ProcessorState>0A0B</ProcessorState><Name Value="" />"#));
+    }
+
+    const KONTAKT_VST2: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5">
+<PluginDevice Id="7"><On /><SourceContext><Value><BranchSourceContext Id="0">
+<BranchDeviceId Value="device:vst:instr:1315513412?n=Kontakt" />
+</BranchSourceContext></Value></SourceContext>
+<PluginDesc>
+<VstPluginInfo Id="0">
+<WinPosX Value="12" />
+<WinPosY Value="34" />
+<Path Value="E:/Plugin 64/Kontakt.dll" />
+<PlugName Value="Kontakt" />
+<UniqueId Value="1315513412" />
+<Preset>
+<VstPreset Id="5">
+<OverwriteProtectionNumber Value="2816" />
+<IsOn Value="false" />
+<Buffer>
+98720E0000000000
+6873696E
+</Buffer>
+<UniqueId Value="1315513412" />
+</VstPreset>
+</Preset>
+</VstPluginInfo>
+</PluginDesc>
+<ParameterList><PluginFloatParameter Id="0"><ParameterId Value="-1" /></PluginFloatParameter></ParameterList>
+</PluginDevice>
+</Ableton>
+"#;
+
+    #[test]
+    fn kontakt_vst2_device_becomes_kontakt_8() {
+        let up = upgrades::from_vst2(u32::from_be_bytes(*b"Ni$D")).unwrap();
+        let found = instances(KONTAKT_VST2);
+        assert_eq!(found.len(), 1);
+        assert!(vst2_movable(KONTAKT_VST2, &found[0]));
+        let inst = &found[0];
+        let info = vst3_info_from_vst2(&KONTAKT_VST2[inst.start..inst.end], up, false).unwrap();
+        let (ds, de) = inst.device.unwrap();
+        let device = format!("{}{}{}", &KONTAKT_VST2[ds..inst.start], info, &KONTAKT_VST2[inst.end..de]);
+        let device = with_branch_id(&device, up.to);
+        let xml = format!("{}{}{}", &KONTAKT_VST2[..ds], device, &KONTAKT_VST2[de..]);
+        // It reads back as Kontakt 8's VST3 with the chunk verbatim.
+        let after = instances(&xml);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].plugin.format, Format::Vst3);
+        assert_eq!(after[0].plugin.id, up.to);
+        assert_eq!(after[0].plugin.name, "Kontakt 8");
+        assert!(xml.contains("<ProcessorState>\n98720E0000000000\n6873696E\n</ProcessorState>"));
+        assert!(xml.contains(r#"<WinPosX Value="12" />"#) && xml.contains(r#"<IsOn Value="false" />"#));
+        assert!(xml.contains(r#"<Vst3Preset Id="5">"#) && xml.contains(r#"<OverwriteProtectionNumber Value="2816" />"#));
+        assert!(xml.contains("device:vst3:instr:5653544e-694b-386b-6f6e-74616b742038"));
+        assert!(!xml.contains("VstPluginInfo") && !xml.contains("<Buffer>"));
+        // A bound parameter slot stops it.
+        let bound = KONTAKT_VST2.replace(r#"<ParameterId Value="-1" />"#, r#"<ParameterId Value="3" />"#);
+        assert!(!vst2_movable(&bound, &instances(&bound)[0]));
     }
 
     #[test]

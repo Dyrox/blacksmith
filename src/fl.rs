@@ -29,11 +29,16 @@ fn assess(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, in_project: &[
     match plugin.format {
         Format::Vst2 => {
             let fourcc = u32::from_be_bytes(plugin.id[..].try_into().unwrap());
-            let fix = convert::upgrade_instance(lib, old, in_project, None).ok().map(|up| Fix::Upgrade {
-                target: name_of(lib, &up.class_id).unwrap_or_else(|| plugin.name.clone()),
-                installed: lib.is_installed(&up.class_id),
-                how: up.how,
-            });
+            let chunked = matches!(get(old, STATE).and_then(convert::vst2_state), Some(convert::Vst2State::Chunk(_)));
+            // A newer product that's installed here beats this plugin's own VST3.
+            let fix = match upgrades::from_vst2(fourcc).filter(|u| chunked && u.installed_in(lib)) {
+                Some(u) => Some(Fix::Migrate { to: u.to_name, verified: u.verified }),
+                None => convert::upgrade_instance(lib, old, in_project, None).ok().map(|up| Fix::Upgrade {
+                    target: name_of(lib, &up.class_id).unwrap_or_else(|| plugin.name.clone()),
+                    installed: lib.is_installed(&up.class_id),
+                    how: up.how,
+                }),
+            };
             (Status::Vst2 { installed: lib.vst2_installed(fourcc) }, fix)
         }
         Format::Vst3 => {
@@ -47,7 +52,7 @@ fn assess(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, in_project: &[
                 _ => (Status::Missing, None),
             };
             // A newer product that's installed here beats a rename.
-            match upgrades::from(&plugin.id).filter(|u| u.installed_in(lib)) {
+            match upgrades::from_vst3(&plugin.id).filter(|u| u.installed_in(lib)) {
                 Some(u) => (status, Some(Fix::Migrate { to: u.to_name, verified: u.verified })),
                 None => (status, fix),
             }
@@ -78,9 +83,14 @@ fn change(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, choice: Option
     let decision = check::decide(fix.as_ref(), choice)?;
     let records = match (decision.pick, plugin.format) {
         (None, Format::Vst3) if matches!(fix, Some(Fix::Migrate { .. })) => {
-            let up = upgrades::from(&plugin.id)?;
+            let up = upgrades::from_vst3(&plugin.id)?;
             let target = repair::target_in(in_project, &up.to).unwrap_or_else(|| up.builtin_target());
             repair::move_vst3(old, &target, up.state, Some(up.to_name))?
+        }
+        (None, Format::Vst2) if matches!(fix, Some(Fix::Migrate { .. })) => {
+            let up = upgrades::from_vst2(u32::from_be_bytes(plugin.id[..].try_into().ok()?))?;
+            let target = repair::target_in(in_project, &up.to).unwrap_or_else(|| up.builtin_target());
+            convert::vst2_to_product(old, &target, up.state, up.to_name)?
         }
         (Some(class_id), Format::Vst2) => {
             let target: &Entry = lib.by_class_id(&class_id)?;

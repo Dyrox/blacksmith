@@ -12,6 +12,15 @@ use crate::convert::Target;
 use crate::library::Library;
 use crate::plugins::template_target;
 
+/// What an upgrade starts from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Source {
+    /// A VST3, by class ID (as FL stores it).
+    Vst3([u8; 16]),
+    /// A VST2, by unique ID (big-endian integer); its chunk is the old state.
+    Vst2(u32),
+}
+
 pub struct Upgrade {
     pub from_name: &'static str,
     pub to_name: &'static str,
@@ -20,9 +29,12 @@ pub struct Upgrade {
     pub note: &'static str,
     /// Checked in a host: the new plugin opens the old state with its sound.
     pub verified: bool,
-    pub from: [u8; 16],
+    pub from: Source,
     pub to: [u8; 16],
     template: &'static [u8],
+    /// The new plugin as Live writes it in a `<Vst3PluginInfo>`: audio inputs,
+    /// audio outputs, `DeviceType` (needed to turn a VST2 into it in a set).
+    pub live: (u32, u32, u32),
     /// Old component state → new (`None`: not recognised).
     pub state: fn(&[u8]) -> Option<Vec<u8>>,
 }
@@ -44,22 +56,45 @@ fn as_is(state: &[u8]) -> Option<Vec<u8>> {
     Some(state.to_vec())
 }
 
-pub const UPGRADES: &[Upgrade] = &[Upgrade {
-    from_name: "Kontakt",
-    to_name: "Kontakt 8",
-    vendor: "Native Instruments",
-    note: "Kontakt 6（VST3）→ Kontakt 8：存档原样交给 Kontakt 8，乐器和音色不变，已在 FL Studio 2025 验证",
-    // Checked by the owner in FL Studio 2025 (Nov 2026): opens, same instrument and sound.
-    verified: true,
-    from: *b"NTSV$ikDontakt\0\0",
-    to: *b"NTSVKik8ontakt 8",
-    template: include_bytes!("../assets/kontakt8-vst3-template.bin"),
-    state: as_is,
-}];
+const KONTAKT_8: [u8; 16] = *b"NTSVKik8ontakt 8";
+const KONTAKT_8_TEMPLATE: &[u8] = include_bytes!("../assets/kontakt8-vst3-template.bin");
 
-/// The upgrade for an instance of this class ID, if any.
-pub fn from(class_id: &[u8]) -> Option<&'static Upgrade> {
-    UPGRADES.iter().find(|u| u.from[..] == *class_id)
+pub const UPGRADES: &[Upgrade] = &[
+    Upgrade {
+        from_name: "Kontakt（VST3）",
+        to_name: "Kontakt 8",
+        vendor: "Native Instruments",
+        note: "Kontakt 6 → Kontakt 8：存档原样交给 Kontakt 8，乐器和音色不变，已在 FL Studio 2025 和 Ableton Live 12 验证",
+        // Checked by the owner (Nov 2026): FL Studio 2025 and a Live set — same instrument and sound.
+        verified: true,
+        from: Source::Vst3(*b"NTSV$ikDontakt\0\0"),
+        to: KONTAKT_8,
+        template: KONTAKT_8_TEMPLATE,
+        live: (0, 16, 1),
+        state: as_is,
+    },
+    Upgrade {
+        from_name: "Kontakt（VST2）",
+        to_name: "Kontakt 8",
+        vendor: "Native Instruments",
+        note: "Kontakt 5/6 的 VST2 → Kontakt 8：VST2 的存档也是 NI 的 hsin 容器，原样交给 Kontakt 8",
+        verified: false,
+        from: Source::Vst2(u32::from_be_bytes(*b"Ni$D")),
+        to: KONTAKT_8,
+        template: KONTAKT_8_TEMPLATE,
+        live: (0, 16, 1),
+        state: as_is,
+    },
+];
+
+/// The upgrade for a VST3 instance of this class ID, if any.
+pub fn from_vst3(class_id: &[u8]) -> Option<&'static Upgrade> {
+    UPGRADES.iter().find(|u| matches!(u.from, Source::Vst3(id) if id[..] == *class_id))
+}
+
+/// The upgrade for a VST2 instance of this unique ID, if any.
+pub fn from_vst2(id: u32) -> Option<&'static Upgrade> {
+    UPGRADES.iter().find(|u| u.from == Source::Vst2(id))
 }
 
 #[cfg(test)]
@@ -73,6 +108,7 @@ mod tests {
             assert_eq!(t.class_id, u.to);
             assert!(t.state.is_some());
         }
-        assert_eq!(from(b"NTSV$ikDontakt\0\0").map(|u| u.to_name), Some("Kontakt 8"));
+        assert_eq!(from_vst3(b"NTSV$ikDontakt\0\0").map(|u| u.to_name), Some("Kontakt 8"));
+        assert_eq!(from_vst2(u32::from_be_bytes(*b"Ni$D")).map(|u| u.to_name), Some("Kontakt 8"));
     }
 }

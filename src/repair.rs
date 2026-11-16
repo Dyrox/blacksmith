@@ -174,9 +174,9 @@ mod tests {
     fn upgrade_moves_to_another_product() {
         // Kontakt (6) → Kontakt 8: new ID, name and path, the state as it was,
         // Kontakt 8's parameter table.
-        let up = crate::upgrades::from(b"NTSV$ikDontakt\0\0").unwrap();
+        let up = crate::upgrades::from_vst3(b"NTSV$ikDontakt\0\0").unwrap();
         let state = write_records(1, &[(VST3_HEADER, vec![1; 64]), (VST3_COMPONENT, b"hsin...".to_vec()), (VST3_PARAM_IDS, vec![0; 8])]);
-        let mut old = read_records(&vst3(&up.from, "Kontakt", "Native Instruments", state)[4..]).unwrap();
+        let mut old = read_records(&vst3(b"NTSV$ikDontakt\0\0", "Kontakt", "Native Instruments", state)[4..]).unwrap();
         old.push((PATH, b"/Library/Audio/Plug-Ins/VST3/Kontakt.vst3".to_vec()));
         let new = move_vst3(&old, &up.builtin_target(), up.state, Some(up.to_name)).unwrap();
         assert_eq!(get(&new, CLASS_ID), Some(&up.to[..]));

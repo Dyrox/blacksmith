@@ -109,6 +109,8 @@ fn main() -> iced::Result {
         .window(window::Settings {
             size: Size::new(1040.0, 680.0),
             min_size: Some(Size::new(820.0, 520.0)),
+            // assets/icon-64.rgba, made by tools/icons.sh from assets/logo.svg.
+            icon: window::icon::from_rgba(include_bytes!("../assets/icon-64.rgba").to_vec(), 64, 64).ok(),
             ..Default::default()
         })
         .run()

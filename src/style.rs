@@ -195,13 +195,6 @@ pub fn icon_circle(size: f32, hovering: bool) -> container::Style {
 }
 
 
-pub fn logo() -> container::Style {
-    container::Style {
-        background: Some(Background::Color(p().text)),
-        border: Border { radius: radius(8.0), ..Default::default() },
-        ..Default::default()
-    }
-}
 
 pub fn count_badge(active: bool) -> container::Style {
     let p = p();

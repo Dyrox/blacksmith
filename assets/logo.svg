@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Blacksmith: an anvil that mends projects (the cross). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26272B"/>
+      <stop offset="1" stop-color="#111214"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#C9CCD2"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="3"/>
+  <!-- the cross, a spark above the anvil -->
+  <g fill="#3DDC84">
+    <rect x="276" y="92" width="44" height="124" rx="14"/>
+    <rect x="236" y="132" width="124" height="44" rx="14"/>
+  </g>
+  <!-- the anvil: horn on the left, face, waist, foot -->
+  <path fill="url(#steel)" d="
+    M 92 250
+    C 128 248 168 244 200 244
+    L 412 244
+    Q 420 244 420 252
+    L 420 300
+    Q 420 308 412 308
+    L 372 308
+    C 352 308 340 320 340 340
+    L 340 352
+    L 382 352
+    Q 398 352 398 368
+    L 398 392
+    Q 398 404 386 404
+    L 206 404
+    Q 194 404 194 392
+    L 194 368
+    Q 194 352 210 352
+    L 252 352
+    L 252 340
+    C 252 320 240 308 220 308
+    L 194 308
+    C 150 306 112 290 92 252
+    Z"/>
+</svg>

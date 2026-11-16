@@ -67,7 +67,8 @@ jobs:
           cargo build --release --target aarch64-apple-darwin
           cargo build --release --target x86_64-apple-darwin
           APP=dist/Blacksmith.app
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp assets/Blacksmith.icns "$APP/Contents/Resources/Blacksmith.icns"
           lipo -create -output "$APP/Contents/MacOS/blacksmith" \
             target/aarch64-apple-darwin/release/blacksmith target/x86_64-apple-darwin/release/blacksmith
           cat > "$APP/Contents/Info.plist" <<PLIST
@@ -75,7 +76,9 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>CFBundleName</key><string>Blacksmith</string>
-            <key>CFBundleIdentifier</key><string>app.blacksmith.upgrader</string>
+            <key>CFBundleIdentifier</key><string>app.blacksmith</string>
+            <key>CFBundleIconFile</key><string>Blacksmith</string>
+            <key>CFBundleGetInfoString</key><string>Blacksmith — 工程文件医生</string>
             <key>CFBundleExecutable</key><string>blacksmith</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -107,4 +110,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: artifacts/*
           body: |
+            **Blacksmith — 工程文件医生.** The project doctor for FL Studio and Ableton Live: open a project, see which plugins won't open on this computer, and save a repaired copy.
+
             Not signed by Apple or Microsoft yet. macOS, first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway.

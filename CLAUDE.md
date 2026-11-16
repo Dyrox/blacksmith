@@ -1,5 +1,9 @@
 # Blacksmith — notes for Claude
 
+Blacksmith, 工程文件医生 — "the project doctor for FL Studio and Ableton Live" (owner's branding,
+Nov 2026; no longer pitched as a VST2→VST3 upgrader). Logo: `assets/logo.svg` (anvil + green
+cross); `tools/icons.sh` renders `.icns` / `.ico` / window icon from it.
+
 Rust + iced 0.14 desktop app with one entry, 检查工程: drop one FL Studio project (.flp) or
 Ableton Live set (.als) in (one at a time — owner's call), see every plugin they use — format, whether FL on this computer can load it (by format + ID,
 against FL's own plugin database), what can be done (upgrade VST2 → VST3, move a wrong VST3 ID to
@@ -152,6 +156,14 @@ Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<f
   FL Studio 2025 (Nov 2026): opens with the same instrument and sound.
 - FL's DB lists Kontakt 8 without a class ID, so `Upgrade::installed_in` also accepts a by-file match.
 - Record 32 (I/O layout) differs (708 vs 384 bytes); the old one is kept.
+- Live: Kontakt VST3 → Kontakt 8 also verified by the owner in a set.
+- Kontakt **VST2** (`Ni$D`, Kontakt 5/6): its chunk is the same `hsin` container, so it goes to
+  Kontakt 8 as is (rule `Source::Vst2`, unverified). In a Live set the `<VstPluginInfo>` is rebuilt as a
+  `<Vst3PluginInfo>` (`als::vst3_info_from_vst2`, modelled on a real Kontakt 8 block): window pos,
+  on/off, overwrite number and preset Id carried over, `<Buffer>` text verbatim as
+  `<ProcessorState>`, `<BranchDeviceId>` → `device:vst3:…`. Refused when any `<ParameterId>` in the
+  device isn't -1 (bound parameters/automation would point at VST2 numbering). Seen on the owner's
+  `gcse Project/version 2.als`: 46 Kontakt 6.6 VST2 instances, all slots unbound.
 
 ## Plugin sources — why not just scan folders
 

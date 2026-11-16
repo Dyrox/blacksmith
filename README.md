@@ -1,10 +1,19 @@
-# Blacksmith
+<p align="center"><img src="assets/logo.svg" width="128" alt="Blacksmith"></p>
 
-Drop an FL Studio project (`.flp`) or Ableton Live set (`.als`) in and see, for every plugin it
-uses, whether FL or Live on this computer can open it — and fix what it can't: upgrade VST2 plugins to VST3 with the same
-sound and settings, or point a plugin saved under an ID you don't have at the plugin you do have.
-Nothing is written until you press 应用; the result is saved next to the project as
-`<name> (修复).flp`, and the original is never touched.
+# Blacksmith — 工程文件医生
+
+**The project doctor for FL Studio and Ableton Live.** Open a project that came from another
+computer, another version or another person, and Blacksmith tells you which plugins won't open
+here and why — then saves a repaired copy:
+
+- **Plugins with the wrong ID** (an older build, another vendor build) are pointed at the plugin you
+  actually have installed, or at one you pick.
+- **VST2 plugins** are upgraded to their VST3 with the same sound and settings.
+- **Old products** are moved to their newer version (升级插件: Kontakt → Kontakt 8, …).
+
+It reads FL Studio `.flp` projects and Ableton Live `.als` sets, checks them against the plugins
+FL or Live can load on this computer, and writes nothing until you press 应用. The result is saved
+next to the project as `<name> (修复).flp` / `.als`; the original is never touched.
 
 ## 检查工程
 
@@ -64,3 +73,7 @@ binary path, and saved state. FL finds a plugin by format and ID, never by name.
 ```
 cargo build --release
 ```
+
+The logo is `assets/logo.svg`; `sh tools/icons.sh` (macOS) renders the app icons from it
+(`assets/Blacksmith.icns` for the .app, `assets/icon.ico` embedded in the .exe by `build.rs`,
+`assets/icon-64.rgba` for the window).
