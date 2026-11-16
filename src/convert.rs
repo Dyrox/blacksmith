@@ -9,21 +9,28 @@
 //! | 51 | FourCC (unique ID, LE)        | —                                             |
 //! | 52 | —                             | class ID (16 bytes, COM byte order)           |
 //! | 55 | path to the .dll              | path to the binary inside the .vst3 bundle    |
-//! | 57 | parameter count               | —                                             |
+//! | 57 | 0x960 on every VST2 seen (meaning unknown) | —                                |
 //! | 53 | 21-byte header + plugin chunk | records: 1 header · 3 component state · 4 parameter ID table |
 //!
 //! Each VST2 instance is matched in order against:
 //! 1. a **known plugin** (`plugins.rs`): exact class ID and a verified state
 //!    conversion;
-//! 2. the **generic** path: find the VST3 version (a VST3 instance of the same
-//!    plugin in this project, else an installed .vst3 — see `vst3.rs`) and hand
-//!    it the VST2 state the way Steinberg's spec says hosts must: as an FXB
-//!    chunk bank (`VST3::tryVst2StateLoad` in the VST3 SDK).
+//! 2. the **generic** path: find the VST3 identity without scanning the
+//!    machine — a VST3 instance of the same plugin in the project, else the
+//!    plugin library (`library.rs`), else FL's own class ID record on the
+//!    instance, else Steinberg's naming rule (`vst3.rs`) and hand it the VST2 state the way Steinberg's spec says
+//!    hosts must: as an FXB bank (`VST3::tryVst2StateLoad` in the VST3 SDK).
 
 use crate::flp::{Project, Records, read_records, write_records};
+use crate::library::{Entry, Library};
 use crate::{plugins, vst3};
 
-const PLUGIN_DATA: u8 = 213;
+pub const PLUGIN_DATA: u8 = 213;
+/// First u32 of FL's wrapper data: a format version, not a plugin type. Seen:
+/// 10 (FL 12–21), 12 (FL 24–25), 8 and 9 in between; flpdiff reports 6–12.
+/// Kept as is when converting.
+const WRAPPER_VERSIONS: std::ops::RangeInclusive<u32> = 6..=12;
+#[cfg(test)]
 const KIND_VST: u32 = 10;
 
 #[cfg(test)]
@@ -35,12 +42,13 @@ pub const STATE: u32 = 53;
 pub const NAME: u32 = 54;
 pub const PATH: u32 = 55;
 pub const VENDOR: u32 = 56;
-pub const PARAM_COUNT: u32 = 57;
+/// Not the parameter count (it is 0x960 on every VST2 seen); dropped on conversion.
+pub const VST2_57: u32 = 57;
 
 const VST3_STATE_VERSION: u32 = 1;
-const VST3_HEADER: u32 = 1;
-const VST3_COMPONENT: u32 = 3;
-const VST3_PARAM_IDS: u32 = 4;
+pub const VST3_HEADER: u32 = 1;
+pub const VST3_COMPONENT: u32 = 3;
+pub const VST3_PARAM_IDS: u32 = 4;
 const VST2_HEADER: usize = 21;
 const VST3_FLAG: u32 = 8;
 
@@ -53,20 +61,35 @@ pub enum How {
     /// rather than from FL or a VST3 instance in the project, so it may not
     /// match what the plugin really uses.
     Generic { derived: bool },
-    /// Already a VST3 instance; left as is.
+    /// Already a VST3 instance; left as is (by `upgrade`, used in tests).
+    #[cfg(test)]
     AlreadyVst3,
+    /// 修复: a VST3 saved by an older build under another class ID, moved to
+    /// the current one by an official rule (state converted too).
+    Relinked(&'static str),
+    /// 修复: a VST3 whose class ID isn't in the library, given the library's ID
+    /// for the plugin of the same name and vendor. State untouched.
+    Reidentified,
+    /// 修复: class ID is in the library (or has a rule) — nothing to do.
+    Recognized,
+    /// 修复: class ID unknown and no library plugin of that name and vendor.
+    NotInLibrary,
     Skipped(String),
 }
 
+/// What a whole-project pass did; the app works per instance (`check.rs`),
+/// tests use these passes.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct Report {
     /// (plugin name, outcome) per VST2 instance found.
     pub items: Vec<(String, How)>,
 }
 
+#[cfg(test)]
 impl Report {
     pub fn converted(&self) -> usize {
-        self.items.iter().filter(|(_, h)| matches!(h, How::Known(_) | How::Generic { .. })).count()
+        self.items.iter().filter(|(_, h)| matches!(h, How::Known(_) | How::Generic { .. } | How::Relinked(_) | How::Reidentified)).count()
     }
 
     /// Instances grouped by (name, outcome), in project order, with counts.
@@ -82,10 +105,16 @@ impl Report {
     }
 }
 
+pub fn wrapper_version(data: &[u8]) -> Option<u32> {
+    let v = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
+    WRAPPER_VERSIONS.contains(&v).then_some(v)
+}
+
+/// The records of a VST wrapper's data. Native plugins also use event 213,
+/// with their own state; those rarely parse as records and never carry a
+/// FourCC or class ID, which every caller checks for.
 pub fn plugin_records(data: &[u8]) -> Option<Records> {
-    if data.len() < 4 || u32::from_le_bytes(data[..4].try_into().ok()?) != KIND_VST {
-        return None;
-    }
+    wrapper_version(data)?;
     read_records(&data[4..])
 }
 
@@ -93,19 +122,19 @@ pub fn get(records: &[(u32, Vec<u8>)], id: u32) -> Option<&[u8]> {
     records.iter().find(|(i, _)| *i == id).map(|(_, d)| d.as_slice())
 }
 
-fn text(records: &[(u32, Vec<u8>)], id: u32) -> String {
+pub fn text(records: &[(u32, Vec<u8>)], id: u32) -> String {
     get(records, id).map(|b| String::from_utf8_lossy(b).trim_end_matches('\0').to_string()).unwrap_or_default()
 }
 
 /// FL's VST2 state: a 21-byte header (byte 4 has bit 3 set for chunk-based
 /// plugins), then either the plugin's chunk, or a parameter list:
 /// `u32 count, count × f32, u32, program name\0, …`.
-enum Vst2State<'a> {
+pub enum Vst2State<'a> {
     Chunk(&'a [u8]),
     Params { values: Vec<f32>, program: String },
 }
 
-fn vst2_state(state: &[u8]) -> Option<Vst2State<'_>> {
+pub fn vst2_state(state: &[u8]) -> Option<Vst2State<'_>> {
     if *state.get(4)? & 0x08 != 0 {
         let size = u64::from_le_bytes(state.get(9..17)?.try_into().ok()?) as usize;
         let chunk = state.get(VST2_HEADER..VST2_HEADER.checked_add(size)?)?;
@@ -142,8 +171,11 @@ impl Target {
 
 /// Builds the VST3 records for one VST2 instance.
 fn vst3_records(old: &[(u32, Vec<u8>)], target: &Target, component_state: Vec<u8>, params: Option<u32>) -> Records {
+    // Chunk-based plugins don't reveal their parameter count. Record 57's value
+    // (0x960) is only a stand-in: an identity table that long is what made
+    // Vital open in FL, so it stays until something better is verified.
     let param_count =
-        params.or_else(|| get(old, PARAM_COUNT).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)).unwrap_or(0);
+        params.or_else(|| get(old, VST2_57).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)).unwrap_or(0);
     let copied = |id| target.state.as_ref().and_then(|s| get(s, id)).map(<[u8]>::to_vec);
     let header = copied(VST3_HEADER).unwrap_or_else(|| {
         let mut h = vec![0; 64];
@@ -165,7 +197,7 @@ fn vst3_records(old: &[(u32, Vec<u8>)], target: &Target, component_state: Vec<u8
     for (id, data) in old {
         match *id {
             // FL may already hold a VST3 class ID for a VST2 instance; replaced below.
-            FOURCC | PARAM_COUNT | CLASS_ID => {}
+            FOURCC | VST2_57 | CLASS_ID => {}
             FLAGS => {
                 let mut f = data.clone();
                 if f.len() >= 4 {
@@ -245,82 +277,122 @@ pub fn fxb_param_bank(fourcc: u32, program: &str, values: &[f32]) -> Vec<u8> {
     b
 }
 
-pub fn upgrade(project: &mut Project) -> Report {
-    let mut report = Report::default();
-
-    // VST3 instances already in the project are the best templates: they match
-    // the installed plugin version and this machine's paths.
-    let in_project: Vec<Records> = project
+/// The VST3 instances already in a project: the best templates for new ones,
+/// as they match the installed plugin version and this machine's paths.
+pub fn vst3_instances(project: &Project) -> Vec<Records> {
+    project
         .events
         .iter()
         .filter(|e| e.id == PLUGIN_DATA)
         .filter_map(|e| plugin_records(&e.data))
         .filter(|r| get(r, CLASS_ID).is_some() && get(r, FOURCC).is_none())
-        .collect();
+        .collect()
+}
 
+pub fn fourcc(records: &[(u32, Vec<u8>)]) -> Option<u32> {
+    get(records, FOURCC).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)
+}
+
+/// A VST2 instance converted: its VST3 records, how, and the VST3's class ID.
+pub struct Upgraded {
+    pub records: Records,
+    pub how: How,
+    pub class_id: Vec<u8>,
+}
+
+/// Converts one VST2 instance. `chosen`: a VST3 the user picked instead of
+/// the one Blacksmith would find (generic conversion to it). `Err`: why not.
+pub fn upgrade_instance(
+    lib: &Library,
+    old: &[(u32, Vec<u8>)],
+    in_project: &[Records],
+    chosen: Option<&Entry>,
+) -> Result<Upgraded, String> {
+    let fourcc = fourcc(old).ok_or("不是 VST2")?;
+    let name = text(old, NAME);
+    let vendor = text(old, VENDOR);
+    let state = get(old, STATE).and_then(vst2_state).ok_or("暂不支持这种存档格式")?;
+
+    let rule = plugins::find(fourcc)
+        .filter(|r| chosen.is_none_or(|c| c.class_id == r.class_id))
+        .and_then(|r| r.component_state(&state).map(|s| (r, s)));
+    if let Some((rule, component)) = rule {
+        let target = in_project
+            .iter()
+            .find(|r| get(r, CLASS_ID) == Some(&rule.class_id[..]))
+            .and_then(|r| Target::from_instance(r))
+            .unwrap_or_else(|| rule.builtin_target());
+        let class_id = target.class_id.clone();
+        return Ok(Upgraded { records: vst3_records(old, &target, component, None), how: How::Known(rule.name), class_id });
+    }
+
+    // The VST3's real class ID from the plugin library, or the user's pick.
+    let table = chosen.or_else(|| lib.find(fourcc));
+    let listed = table.map(|k| &k.class_id[..]);
+    // FL sometimes already records the VST3 class ID of a VST2 instance
+    // (when its plugin manager pairs the two formats).
+    let known = get(old, CLASS_ID).filter(|id| id.len() == 16 && chosen.is_none());
+    let derived = vst3::class_id_from_vst2(fourcc, &name);
+    let in_proj = in_project
+        .iter()
+        .find(|r| {
+            let id = get(r, CLASS_ID);
+            if chosen.is_some() {
+                return id == listed;
+            }
+            (listed.is_some() && id == listed)
+                || id == known
+                || id == Some(&derived[..])
+                || (text(r, NAME) == name && text(r, VENDOR) == vendor)
+        })
+        .and_then(|r| Target::from_instance(r));
+    let derived_id = in_proj.is_none() && listed.is_none() && known.is_none();
+    let bundle = table.map_or(name.as_str(), |k| k.vst3_file.trim_end_matches(".vst3"));
+    let target = in_proj.unwrap_or_else(|| Target {
+        class_id: listed.or(known).map(<[u8]>::to_vec).unwrap_or(derived),
+        path: vst3::default_path(bundle, &text(old, PATH)),
+        state: None,
+    });
+    let records = match &state {
+        Vst2State::Chunk(chunk) => vst3_records(old, &target, fxb_chunk_bank(fourcc, chunk), None),
+        Vst2State::Params { values, program } => {
+            vst3_records(old, &target, fxb_param_bank(fourcc, program, values), Some(values.len() as u32))
+        }
+    };
+    Ok(Upgraded { records, how: How::Generic { derived: derived_id }, class_id: target.class_id })
+}
+
+#[cfg(test)]
+pub fn upgrade(project: &mut Project) -> Report {
+    let mut report = Report::default();
+    let in_project = vst3_instances(project);
     for event in project.events.iter_mut().filter(|e| e.id == PLUGIN_DATA) {
         let Some(old) = plugin_records(&event.data) else { continue };
-        let Some(fourcc) = get(&old, FOURCC).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes) else {
+        let Some(fourcc) = fourcc(&old) else {
             if get(&old, CLASS_ID).is_some() {
                 report.items.push((text(&old, NAME), How::AlreadyVst3));
             }
             continue;
         };
         let name = text(&old, NAME);
-        let vendor = text(&old, VENDOR);
-        let display = if name.is_empty() { format!("{fourcc:08X}") } else { name.clone() };
-
-        let Some(state) = get(&old, STATE).and_then(vst2_state) else {
-            report.items.push((display, How::Skipped("暂不支持这种存档格式".into())));
-            continue;
-        };
-
-        let rule = plugins::find(fourcc).filter(|_| matches!(state, Vst2State::Chunk(_)));
-        let (records, how) = if let (Some(rule), Vst2State::Chunk(chunk)) = (rule, &state) {
-            let target = in_project
-                .iter()
-                .find(|r| get(r, CLASS_ID) == Some(&rule.class_id[..]))
-                .and_then(|r| Target::from_instance(r))
-                .unwrap_or_else(|| rule.builtin_target());
-            (vst3_records(&old, &target, (rule.state)(chunk), None), How::Known(rule.name))
-        } else {
-            // FL sometimes already records the VST3 class ID of a VST2 instance
-            // (when its plugin manager pairs the two formats).
-            let known = get(&old, CLASS_ID).filter(|id| id.len() == 16);
-            let derived = vst3::class_id_from_vst2(fourcc, &name);
-            let in_proj = in_project
-                .iter()
-                .find(|r| {
-                    let id = get(r, CLASS_ID);
-                    id == known || id == Some(&derived[..]) || (text(r, NAME) == name && text(r, VENDOR) == vendor)
-                })
-                .and_then(|r| Target::from_instance(r));
-            let derived_id = in_proj.is_none() && known.is_none();
-            let target = in_proj.unwrap_or_else(|| Target {
-                class_id: known.map(<[u8]>::to_vec).unwrap_or(derived),
-                path: vst3::default_path(&name, &text(&old, PATH)),
-                state: None,
-            });
-            let generic = How::Generic { derived: derived_id };
-            match &state {
-                Vst2State::Chunk(chunk) => (vst3_records(&old, &target, fxb_chunk_bank(fourcc, chunk), None), generic),
-                Vst2State::Params { values, program } => (
-                    vst3_records(&old, &target, fxb_param_bank(fourcc, program, values), Some(values.len() as u32)),
-                    generic,
-                ),
+        let display = if name.is_empty() { format!("{fourcc:08X}") } else { name };
+        match upgrade_instance(crate::library::get(crate::library::Host::Fl), &old, &in_project, None) {
+            Ok(up) => {
+                let version = wrapper_version(&event.data).unwrap_or(10);
+                event.data = write_records(version, &up.records);
+                report.items.push((display, up.how));
             }
-        };
-        event.data = write_records(KIND_VST, &records);
-        report.items.push((display, how));
+            Err(why) => report.items.push((display, How::Skipped(why))),
+        }
     }
     report
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn project(events: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
+    pub(crate) fn project(events: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
         let mut out = b"FLhd\x06\x00\x00\x00\x00\x00\x02\x00\x60\x00".to_vec();
         let mut body = Vec::new();
         for (id, d) in events {
@@ -355,7 +427,7 @@ mod tests {
                 (NAME, name.as_bytes().to_vec()),
                 (PATH, b"C:\\x.dll".to_vec()),
                 (STATE, state),
-                (PARAM_COUNT, 3u32.to_le_bytes().to_vec()),
+                (VST2_57, 3u32.to_le_bytes().to_vec()),
             ],
         )
     }
@@ -371,7 +443,7 @@ mod tests {
         let r = plugin_records(&p.events[1].data).unwrap();
         assert_eq!(get(&r, CLASS_ID), Some(&b"XTSVsfsXerum\0\0\0\0"[..]));
         assert_eq!(get(&r, FOURCC), None);
-        assert_eq!(get(&r, PARAM_COUNT), None);
+        assert_eq!(get(&r, VST2_57), None);
         assert_eq!(get(&r, WINDOW), Some(&b"win"[..]));
         let st = read_records(&get(&r, STATE).unwrap()[4..]).unwrap();
         assert_eq!(get(&st, VST3_COMPONENT), Some(&b"patch"[..]));
@@ -449,6 +521,53 @@ mod tests {
         let r = plugin_records(&p.events[0].data).unwrap();
         assert_eq!(get(&r, CLASS_ID), Some(&vst3::class_id_from_vst2(u32::from_le_bytes(*b"ooFX"), "Foo")[..]));
         assert_eq!(get(&r, PATH), Some(&b"C:\\Program Files\\Common Files\\VST3\\Foo.vst3"[..]));
+    }
+
+    #[test]
+    fn ott_gets_its_parameters_as_raw_floats() {
+        // OTT's VST2 saves parameters, not a chunk; its VST3 ignores an FxBk bank.
+        let mut state = vec![0xf7, 0xff, 0xff, 0xff, 0x05, 0xfe, 0xff, 0xff, 0xff];
+        state.extend([0u8; 12]);
+        state.extend(19u32.to_le_bytes());
+        let values: Vec<f32> = (0..19).map(|i| i as f32 / 100.0 + 0.5).collect();
+        values.iter().for_each(|v| state.extend(v.to_le_bytes()));
+        state.extend(b"\x01\0\0\0DefaultProgram\0");
+        let vst2 = write_records(KIND_VST, &[(FLAGS, vec![0; 16]), (FOURCC, b"TTfX".to_vec()), (NAME, b"OTT".to_vec()), (STATE, state)]);
+        let mut p = Project::parse(&project(vec![(PLUGIN_DATA, vst2)])).unwrap();
+        assert_eq!(upgrade(&mut p).items, [("OTT".to_string(), How::Known("OTT"))]);
+
+        let r = plugin_records(&p.events[0].data).unwrap();
+        assert_eq!(get(&r, CLASS_ID), Some(&b"XTSVTfoTtt\0\0\0\0\0\0"[..]));
+        let st = read_records(&get(&r, STATE).unwrap()[4..]).unwrap();
+        let comp = get(&st, VST3_COMPONENT).unwrap();
+        assert_eq!(comp.len(), 80);
+        assert_eq!(&comp[..4], &0.5f32.to_le_bytes());
+        assert_eq!(&comp[76..], &0f32.to_le_bytes());
+        // The VST3's own parameter table: 0..=19 and 'prog'.
+        assert_eq!(get(&st, VST3_PARAM_IDS).unwrap().len(), 88);
+    }
+
+    #[test]
+    fn reads_newer_wrapper_versions_and_keeps_them() {
+        // FL 25 saves wrapper data with version 12 instead of 10.
+        let mut data = vst2(b"ooFX", "Foo", b"x");
+        data[..4].copy_from_slice(&12u32.to_le_bytes());
+        let bytes = project(vec![(PLUGIN_DATA, data)]);
+        let mut p = Project::parse(&bytes).unwrap();
+        assert_eq!(upgrade(&mut p).converted(), 1);
+        assert_eq!(wrapper_version(&p.events[0].data), Some(12));
+    }
+
+    #[test]
+    fn generic_prefers_the_built_in_id_table() {
+        // FabFilter doesn't follow Steinberg's rule; the table has its real ID.
+        let bytes = project(vec![(PLUGIN_DATA, vst2(b"p3QF", "FabFilter Pro-Q 3", b"x"))]);
+        let mut p = Project::parse(&bytes).unwrap();
+        assert_eq!(upgrade(&mut p).items, [("FabFilter Pro-Q 3".to_string(), How::Generic { derived: false })]);
+        let r = plugin_records(&p.events[0].data).unwrap();
+        let real = [0x71, 0xdb, 0xc4, 0x72, 0x4d, 0x7a, 0x9a, 0x45, 0xb9, 0x7e, 0x51, 0x74, 0x5d, 0x84, 0xb3, 0x9d];
+        assert_eq!(get(&r, CLASS_ID), Some(&real[..]));
+        assert_eq!(get(&r, PATH), Some(&b"C:\\Program Files\\Common Files\\VST3\\FabFilter Pro-Q 3.vst3"[..]));
     }
 
     #[test]

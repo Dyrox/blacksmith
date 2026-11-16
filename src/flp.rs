@@ -95,9 +95,11 @@ pub fn read_records(mut b: &[u8]) -> Option<Records> {
     let mut out = Vec::new();
     while !b.is_empty() {
         let id = u32::from_le_bytes(b.get(..4)?.try_into().ok()?);
-        let size = u64::from_le_bytes(b.get(4..12)?.try_into().ok()?) as usize;
-        out.push((id, b.get(12..12 + size)?.to_vec()));
-        b = &b[12 + size..];
+        // Untrusted: other plugins' state can look like a record list.
+        let size = usize::try_from(u64::from_le_bytes(b.get(4..12)?.try_into().ok()?)).ok()?;
+        let end = size.checked_add(12)?;
+        out.push((id, b.get(12..end)?.to_vec()));
+        b = &b[end..];
     }
     Some(out)
 }
@@ -110,4 +112,18 @@ pub fn write_records(prefix: u32, records: &[(u32, Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(data);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_reject_bogus_sizes() {
+        let mut b = 1u32.to_le_bytes().to_vec();
+        b.extend(u64::MAX.to_le_bytes());
+        assert!(read_records(&b).is_none());
+        let ok = write_records(0, &[(54, b"Serum".to_vec())]);
+        assert_eq!(read_records(&ok[4..]), Some(vec![(54, b"Serum".to_vec())]));
+    }
 }

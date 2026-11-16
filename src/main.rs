@@ -1,31 +1,94 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod als;
+mod check;
 mod convert;
+mod document;
+mod dump;
+mod fl;
+mod fldb;
+mod folders;
 mod flp;
+mod library;
+mod livedb;
 mod platform;
 mod plugins;
+mod repair;
 mod style;
+mod view;
 mod vst3;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use convert::How;
-use iced::widget::scrollable::{Direction, Scrollbar};
+use check::{Choice, Choices, Finding, Fix, Plugin, Status};
+use document::Document;
+use library::Host;
 use iced::theme::Mode;
-use iced::widget::{Column, Space, button, center, column, container, row, scrollable};
-use iced::{Alignment, Element, Event, Length, Padding, Size, Subscription, Task, Theme, event, keyboard, system, window};
+use iced::widget::operation;
+use iced::{Event, Size, Subscription, Task, Theme, event, keyboard, system, window};
 use style::*;
 
 fn main() -> iced::Result {
-    // `blacksmith a.flp b.flp …` converts without opening a window.
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    // `blacksmith --dump a.flp [b.flp]` lists plugins, or compares a project
+    // with FL's re-save of its fixed copy.
+    if files.first().is_some_and(|f| f.as_os_str() == "--dump") {
+        if let Err(e) = dump::run(&files[1..]) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    // `blacksmith --library` prints each host's plugin library and where it came from.
+    if files.first().is_some_and(|f| f.as_os_str() == "--library") {
+        for host in [Host::Fl, Host::Live] {
+            let lib = library::get(host);
+            match lib.source() {
+                library::Source::Host(d) => eprintln!("{}：插件数据库 {}", host.name(), d.display()),
+                library::Source::Folders => eprintln!("{}：没找到插件数据库，用插件文件夹 + 内置列表", host.name()),
+            }
+            let scan = lib.scan();
+            eprintln!(
+                "  插件文件夹 {} 个插件；moduleinfo.json 补上 {} 个 ID；忽略 {} 个已删除的；未扫描：{}",
+                scan.on_disk,
+                scan.ids_from_files,
+                scan.stale,
+                scan.unregistered.join(", ")
+            );
+            for k in lib.all() {
+                let fourcc = k.fourcc.map_or("-".to_string(), |f| format!("{f:08x}"));
+                let id: String = k.class_id.iter().map(|b| format!("{b:02x}")).collect();
+                let kind = if k.instrument { "instrument" } else { "effect" };
+                println!("{}\t{fourcc}\t{id}\t{kind}\t{}\t{}\t{}", host.name(), k.vst3_file, k.vendor, k.name);
+            }
+        }
+        return Ok(());
+    }
+    // `blacksmith a.flp b.als folder …` checks without a window and writes nothing;
+    // with `--apply` it also saves the default fixes, like pressing 应用.
     if !files.is_empty() {
-        for f in &files {
-            let s = run(f, true);
-            let list = s.groups().iter().map(|(n, h, c)| format!("{c}× {n} [{}]", badge(h).0)).collect::<Vec<_>>();
-            println!("{}  {}  {}", f.display(), s.headline(), list.join(", "));
+        let apply = files.iter().any(|f| f.as_os_str() == "--apply");
+        let files: Vec<PathBuf> = files.into_iter().filter(|f| f.as_os_str() != "--apply").collect();
+        for f in projects_in(files) {
+            let before = match analyse(&f) {
+                ProjectState::Checked { findings, .. } => findings,
+                other => {
+                    println!("{}  {}", f.display(), other.headline());
+                    continue;
+                }
+            };
+            let list: Vec<String> = before
+                .iter()
+                .map(|x| {
+                    let fix = x.fix.as_ref().filter(|x| x.default_on()).map(|x| format!(" → {}", fix_label(x))).unwrap_or_default();
+                    format!("{}× {} [{}{fix}]", x.instances, x.plugin.name, status_label(&x.status).0)
+                })
+                .collect();
+            let state = if apply { save(&f, &Choices::new()) } else { analyse(&f) };
+            println!("{}  {}  {}", f.display(), state.headline(), list.join(", "));
         }
         return Ok(());
     }
@@ -35,8 +98,8 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .theme(|app: &App| if app.dark { Theme::Dark } else { Theme::Light })
         .window(window::Settings {
-            size: Size::new(880.0, 620.0),
-            min_size: Some(Size::new(700.0, 480.0)),
+            size: Size::new(1040.0, 680.0),
+            min_size: Some(Size::new(820.0, 520.0)),
             ..Default::default()
         })
         .run()
@@ -44,78 +107,115 @@ fn main() -> iced::Result {
 
 // ------------------------------------------------------------------ work
 
-type Groups = Vec<(String, How, usize)>;
-
-enum State {
-    /// Analysed; `n` instances will be converted when the user asks.
-    Ready { groups: Groups, n: usize },
-    Done { groups: Groups, out: PathBuf },
-    /// Nothing to convert (no VST2, or none convertible).
-    Nothing { groups: Groups, note: &'static str },
+#[derive(Debug, Clone)]
+enum ProjectState {
+    /// Read; nothing written yet.
+    Checked { host: Host, findings: Vec<Finding> },
+    /// Fixes applied and saved to `out`; `findings` are the saved copy's.
+    Saved { host: Host, out: PathBuf, changed: usize, findings: Vec<Finding> },
     Failed(String),
 }
 
-impl State {
-    fn groups(&self) -> &[(String, How, usize)] {
+impl ProjectState {
+    fn findings(&self) -> &[Finding] {
         match self {
-            State::Ready { groups, .. } | State::Done { groups, .. } | State::Nothing { groups, .. } => groups,
-            State::Failed(_) => &[],
+            ProjectState::Checked { findings, .. } | ProjectState::Saved { findings, .. } => findings,
+            ProjectState::Failed(_) => &[],
+        }
+    }
+
+    /// The host the project belongs to (FL Studio when it couldn't be read).
+    fn host(&self) -> Host {
+        match self {
+            ProjectState::Checked { host, .. } | ProjectState::Saved { host, .. } => *host,
+            ProjectState::Failed(_) => Host::Fl,
         }
     }
 
     fn headline(&self) -> String {
         match self {
-            State::Ready { n, .. } => format!("可转换 {n} 个插件"),
-            State::Done { out, .. } => format!("已另存为 {}", out.file_name().unwrap_or_default().to_string_lossy()),
-            State::Nothing { note, .. } => note.to_string(),
-            State::Failed(e) => e.clone(),
+            ProjectState::Checked { findings, .. } => match check::pending(findings, &Choices::new()) {
+                0 => "没有需要处理的插件".into(),
+                n => format!("{n} 处可以处理"),
+            },
+            ProjectState::Saved { out, changed, .. } => {
+                format!("已另存为 {}（改了 {changed} 处）", out.file_name().unwrap_or_default().to_string_lossy())
+            }
+            ProjectState::Failed(e) => e.clone(),
         }
     }
 }
 
-/// Analyses a project and, if `write`, saves `<name> (VST3).flp` next to it.
+/// Reads a project and lists its plugins. Writes nothing.
+fn analyse(path: &Path) -> ProjectState {
+    match Document::read(path) {
+        Ok(d) => ProjectState::Checked { host: d.host(), findings: d.analyse() },
+        Err(e) => ProjectState::Failed(e),
+    }
+}
+
+/// Applies the choices and saves `<name> (修复).<ext>` next to the project.
 /// The original is never touched.
-fn run(path: &Path, write: bool) -> State {
-    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp")) {
-        return State::Failed("不是 .flp 文件".into());
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => return State::Failed(format!("读取失败：{e}")),
+fn save(path: &Path, choices: &Choices) -> ProjectState {
+    let mut doc = match Document::read(path) {
+        Ok(d) => d,
+        Err(e) => return ProjectState::Failed(e),
     };
-    let mut project = match flp::Project::parse(&bytes) {
-        Ok(p) if p.to_bytes() == bytes => p,
-        Ok(_) => return State::Failed("无法无损读取这个工程".into()),
-        Err(e) => return State::Failed(format!("无法读取：{e}")),
-    };
-    let report = convert::upgrade(&mut project);
-    let groups = report.groups();
-    let n = report.converted();
-    if n == 0 {
-        let note = if report.items.iter().any(|(_, h)| matches!(h, How::Skipped(_))) {
-            "有 VST2 插件，但都无法转换"
-        } else {
-            "没有需要转换的 VST2 插件"
-        };
-        return State::Nothing { groups, note };
-    }
-    if !write {
-        return State::Ready { groups, n };
+    let host = doc.host();
+    let changed = doc.apply(choices);
+    if changed == 0 {
+        return ProjectState::Checked { host, findings: doc.analyse() };
     }
     let out = output_path(path);
-    match std::fs::write(&out, project.to_bytes()) {
-        Ok(()) => State::Done { groups, out },
-        Err(e) => State::Failed(format!("保存失败：{e}")),
+    match std::fs::write(&out, doc.to_bytes()) {
+        Ok(()) => ProjectState::Saved { host, out, changed, findings: doc.analyse() },
+        Err(e) => ProjectState::Failed(format!("保存失败：{e}")),
     }
+}
+
+/// The projects in `paths`: files as given, folders searched (Backup folders
+/// — FL's and Live's —, hidden folders and Blacksmith's own results skipped).
+fn projects_in(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        let Ok(read) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if p.is_dir() {
+                if depth < 12 && !name.starts_with('.') && !name.eq_ignore_ascii_case("Backup") {
+                    walk(&p, out, depth + 1);
+                }
+            } else if document::is_document(&p) && !is_ours(&name) {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for p in paths {
+        if p.is_dir() {
+            walk(&p, &mut out, 0);
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// `x (修复).flp`, `x (修复) 2.als`, and the older `x (VST3).flp`: copies
+/// Blacksmith saved.
+fn is_ours(file: &str) -> bool {
+    ["修复", "VST3"].iter().any(|s| file.contains(&format!(" ({s}).")) || file.contains(&format!(" ({s}) ")))
 }
 
 fn output_path(path: &Path) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path.extension().unwrap_or_default().to_string_lossy();
     let dir = path.parent().unwrap_or(Path::new("."));
-    let mut out = dir.join(format!("{stem} (VST3).flp"));
+    let mut out = dir.join(format!("{stem} (修复).{ext}"));
     let mut i = 2;
     while out.exists() {
-        out = dir.join(format!("{stem} (VST3) {i}.flp"));
+        out = dir.join(format!("{stem} (修复) {i}.{ext}"));
         i += 1;
     }
     out
@@ -131,43 +231,81 @@ fn reveal_in_folder(path: &Path) {
     let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(Path::new("."))).spawn();
 }
 
-/// Label and colour for a plugin's outcome.
-fn badge(how: &How) -> (String, Tone) {
-    match how {
-        How::Known(_) => ("官方支持".into(), Tone::Green),
-        How::Generic { derived: false } => ("通用转换".into(), Tone::Blue),
-        How::Generic { derived: true } => ("通用转换 · 推导 ID".into(), Tone::Blue),
-        How::AlreadyVst3 => ("已是 VST3".into(), Tone::Grey),
-        How::Skipped(why) => (format!("跳过 · {why}"), Tone::Amber),
+/// Words and colour for a plugin's status.
+fn status_label(status: &Status) -> (String, Tone) {
+    match status {
+        Status::Installed => ("已安装".into(), Tone::Green),
+        Status::Mismatch => ("ID 对不上".into(), Tone::Amber),
+        Status::Missing => ("未安装".into(), Tone::Red),
+        Status::Vst2 { installed: Some(true) } => ("VST2 · 已安装".into(), Tone::Green),
+        Status::Vst2 { installed: Some(false) } => ("VST2 · 未安装".into(), Tone::Red),
+        Status::Vst2 { installed: None } => ("VST2".into(), Tone::Amber),
+    }
+}
+
+/// What a fix does, in words.
+fn fix_label(fix: &Fix) -> String {
+    match fix {
+        Fix::Upgrade { target, installed: true, .. } => format!("升级到 {target} VST3"),
+        Fix::Upgrade { target, installed: false, .. } => format!("升级到 {target} VST3（这台电脑没装）"),
+        Fix::Relink { rule } => format!("改成已装的 {rule}"),
+        Fix::Rename { target } => format!("改成已装的 {target}"),
     }
 }
 
 // ------------------------------------------------------------------ app
 
+/// Which plugins the table shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Filter {
+    /// Anything not installed as is: VST2, wrong ID, missing.
+    Attention,
+    All,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Page {
-    Convert,
+    Check,
+    Library,
     Supported,
 }
 
+const SEARCH: &str = "library-search";
+const PICK_SEARCH: &str = "pick-search";
+
+/// The project being checked: one at a time.
 struct Item {
     path: PathBuf,
-    state: State,
-    /// When this item (re)appeared; drives its reveal animation.
-    shown_at: Instant,
+    state: ProjectState,
 }
 
 struct App {
     dark: bool,
     page: Page,
     hovering: bool,
-    items: Vec<Item>,
+    project: Option<Item>,
+    /// What the user decided per plugin.
+    choices: Choices,
+    filter: Filter,
+    /// The plugin a replacement is being picked for, and the picker's search.
+    picking: Option<Plugin>,
+    pick_query: String,
     now: Instant,
     /// Animation clocks: launch (first frame), last page switch, last drag-hover change.
     boot_at: Instant,
     page_at: Instant,
     hover_at: Instant,
     started: bool,
+    /// When the table last changed; drives its rows' reveal.
+    list_at: Instant,
+    /// Analyses still running in the background.
+    scanning: usize,
+    /// Plugin library page: which host's library, search text, open vendors
+    /// (lower-case), last vendor opened and when.
+    library_host: Host,
+    query: String,
+    open: HashSet<String>,
+    opened: Option<(String, Instant)>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,18 +314,32 @@ enum Message {
     Hover(bool),
     Nav(Page),
     Browse,
-    Picked(Vec<PathBuf>),
-    Convert,
+    Picked(Option<PathBuf>),
+    Analysed(PathBuf, ProjectState),
+    Apply,
     Clear,
-    Remove(usize),
     Reveal(PathBuf),
+    Filter(Filter),
+    /// Tick or untick a plugin's fix.
+    Tick(Plugin, bool),
+    /// Keep (false) or reset (true) a ticked plugin's settings.
+    Reset(Plugin, bool),
+    /// Open the picker for a plugin; `None` closes it.
+    Pick(Option<Plugin>),
+    PickSearch(String),
+    /// Use this installed VST3 (class ID) for the plugin being picked for.
+    PickTarget([u8; 16]),
     Theme(Mode),
     Focused,
     Frame(Instant),
+    Search(String),
+    FocusSearch,
+    LibraryHost(Host),
+    ToggleVendor(String),
+    ExpandAll(bool),
 }
 
-/// Reveal animation: card first, then each plugin row a beat later.
-const STAGGER: f32 = 0.05;
+/// Reveal animation timing.
 const FADE: f32 = 0.25;
 const SLIDE: f32 = 0.5;
 
@@ -210,39 +362,62 @@ impl App {
         let forced = std::env::var("BLACKSMITH_DARK").is_ok();
         let dark = forced || platform::system_dark().unwrap_or(false);
         style::set_dark(dark);
+        // Read FL's plugin database off the UI thread while the window opens.
+        std::thread::spawn(library::warm);
         let now = Instant::now();
         let mut app = Self {
             dark,
-            page: Page::Convert,
+            page: Page::Check,
             hovering: false,
-            items: Vec::new(),
+            project: None,
+            choices: Choices::new(),
+            filter: Filter::Attention,
+            picking: None,
+            pick_query: String::new(),
             now,
             boot_at: now,
             page_at: now,
             // As if the last hover ended long ago, so nothing swells at launch.
             hover_at: now.checked_sub(Duration::from_secs(10)).unwrap_or(now),
             started: false,
+            list_at: now,
+            scanning: 0,
+            library_host: Host::Fl,
+            query: String::new(),
+            open: HashSet::new(),
+            opened: None,
         };
         // Debug aids: BLACKSMITH_DROP=<file> acts as a drop at launch;
-        // BLACKSMITH_PAGE=supported opens the supported-plugins page.
-        if let Some(f) = std::env::var_os("BLACKSMITH_DROP") {
-            app.add(PathBuf::from(f));
+        // BLACKSMITH_PAGE=library|supported opens that page.
+        let drop = std::env::var_os("BLACKSMITH_DROP").map(|f| app.analyse(PathBuf::from(f)));
+        match std::env::var("BLACKSMITH_PAGE").as_deref() {
+            Ok("supported") => app.page = Page::Supported,
+            Ok("library") => {
+                app.page = Page::Library;
+                app.open.extend(["fabfilter".to_string(), "xfer records".to_string()]);
+            }
+            _ => {}
         }
-        if std::env::var("BLACKSMITH_PAGE").as_deref() == Ok("supported") {
-            app.page = Page::Supported;
-        }
-        (app, if forced { Task::none() } else { system::theme().map(Message::Theme) })
+        let theme = if forced { Task::none() } else { system::theme().map(Message::Theme) };
+        (app, Task::batch([theme, drop.unwrap_or_else(Task::none)]))
     }
 
-    fn add(&mut self, path: PathBuf) {
-        let item = Item { state: run(&path, false), path, shown_at: Instant::now() };
-        // Dropping the same file again re-analyses it in place.
-        match self.items.iter_mut().find(|i| i.path == item.path) {
-            Some(existing) => *existing = item,
-            None => self.items.push(item),
-        }
-        self.go(Page::Convert);
+    /// Reads a project off the UI thread; it replaces the one shown.
+    fn analyse(&mut self, path: PathBuf) -> Task<Message> {
+        self.go(Page::Check);
         self.now = Instant::now();
+        self.scanning += 1;
+        Task::perform(
+            async move {
+                let state = if path.is_dir() {
+                    ProjectState::Failed("这是一个文件夹；请拖入一个 .flp 或 .als 工程".into())
+                } else {
+                    analyse(&path)
+                };
+                (path, state)
+            },
+            |(p, s)| Message::Analysed(p, s),
+        )
     }
 
     fn go(&mut self, page: Page) {
@@ -262,15 +437,28 @@ impl App {
         self.now.saturating_duration_since(at).as_secs_f32()
     }
 
-    fn ready(&self) -> usize {
-        self.items.iter().filter_map(|i| if let State::Ready { n, .. } = i.state { Some(n) } else { None }).sum()
+    /// Instances the 应用 button would change.
+    fn pending(&self) -> usize {
+        match self.project.as_ref().map(|i| &i.state) {
+            Some(ProjectState::Checked { findings, .. }) => check::pending(findings, &self.choices),
+            _ => 0,
+        }
+    }
+
+    /// Whether a plugin's fix is on, under the user's choice or by default.
+    fn ticked(&self, f: &Finding) -> bool {
+        match self.choices.get(&f.plugin) {
+            Some(Choice::Off) => false,
+            Some(Choice::On { .. } | Choice::Pick { .. }) => true,
+            None => f.fix.as_ref().is_some_and(Fix::default_on),
+        }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Dropped(path) => {
                 self.hovering = false;
-                self.add(path);
+                return self.analyse(path);
             }
             Message::Hover(h) => {
                 if self.hovering != h {
@@ -287,39 +475,71 @@ impl App {
                 return Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
-                            .set_title("选择 FL Studio 工程")
-                            .add_filter("FL Studio 工程", &["flp"])
-                            .pick_files()
+                            .set_title("选择工程")
+                            .add_filter("FL Studio / Ableton Live 工程", &document::EXTENSIONS)
+                            .pick_file()
                             .await
-                            .map(|files| files.iter().map(|f| f.path().to_path_buf()).collect())
-                            .unwrap_or_default()
+                            .map(|f| f.path().to_path_buf())
                     },
                     Message::Picked,
                 );
             }
-            Message::Picked(paths) => paths.into_iter().for_each(|p| self.add(p)),
-            Message::Convert => {
-                let now = Instant::now();
-                for item in &mut self.items {
-                    if matches!(item.state, State::Ready { .. }) {
-                        item.state = run(&item.path, true);
-                        item.shown_at = now; // pop the updated card in again
-                    }
+            Message::Picked(None) => {}
+            Message::Picked(Some(path)) => return self.analyse(path),
+            Message::Analysed(path, state) => {
+                self.scanning = self.scanning.saturating_sub(1);
+                // A different project starts with fresh choices.
+                if self.project.as_ref().is_none_or(|p| p.path != path) {
+                    self.choices.clear();
                 }
-                self.go(Page::Convert);
-                self.now = now;
+                self.project = Some(Item { path, state });
+                self.list_at = Instant::now();
+                self.now = self.list_at;
+            }
+            Message::Apply => {
+                if self.pending() > 0 {
+                    let item = self.project.as_mut().expect("pending implies a project");
+                    item.state = save(&item.path, &self.choices);
+                    self.list_at = Instant::now();
+                    self.now = self.list_at;
+                }
             }
             Message::Clear => {
-                self.items.clear();
+                self.project = None;
+                self.choices.clear();
                 self.boot_at = Instant::now(); // replay the drop-zone pop
+                self.list_at = self.boot_at;
                 self.now = self.boot_at;
             }
-            Message::Remove(i) => {
-                if i < self.items.len() {
-                    self.items.remove(i);
+            Message::Reveal(path) => reveal_in_folder(&path),
+            Message::Filter(filter) => {
+                self.filter = filter;
+                self.list_at = Instant::now();
+                self.now = self.list_at;
+            }
+            Message::Tick(plugin, on) => {
+                let reset = self.choices.get(&plugin).is_some_and(|c| c.reset());
+                self.choices.insert(plugin, if on { Choice::On { reset } } else { Choice::Off });
+            }
+            Message::Reset(plugin, reset) => {
+                if let Some(c) = self.choices.get_mut(&plugin) {
+                    *c = c.with_reset(reset);
                 }
             }
-            Message::Reveal(path) => reveal_in_folder(&path),
+            Message::Pick(plugin) => {
+                let open = plugin.is_some();
+                self.picking = plugin;
+                self.pick_query.clear();
+                if open {
+                    return operation::focus(PICK_SEARCH);
+                }
+            }
+            Message::PickSearch(q) => self.pick_query = q,
+            Message::PickTarget(class_id) => {
+                if let Some(plugin) = self.picking.take() {
+                    self.choices.insert(plugin, Choice::Pick { id: class_id, reset: false });
+                }
+            }
             Message::Theme(mode) => {
                 if platform::system_dark().is_none() {
                     self.set_dark(mode == Mode::Dark);
@@ -337,30 +557,46 @@ impl App {
                 if !self.started {
                     self.started = true;
                     self.boot_at = now;
-                    self.items.iter_mut().for_each(|i| i.shown_at = now);
+                    self.list_at = now;
                 }
                 self.now = now;
+            }
+            Message::Search(q) => self.query = q,
+            Message::LibraryHost(host) => {
+                self.library_host = host;
+                self.open.clear();
+                self.list_at = Instant::now();
+                self.now = self.list_at;
+            }
+            Message::FocusSearch => {
+                self.go(Page::Library);
+                self.now = Instant::now();
+                return operation::focus(SEARCH);
+            }
+            Message::ToggleVendor(vendor) => {
+                if !self.open.remove(&vendor) {
+                    self.open.insert(vendor.clone());
+                    self.opened = Some((vendor, Instant::now()));
+                    self.now = Instant::now();
+                }
+            }
+            Message::ExpandAll(open) => {
+                self.open.clear();
+                if open {
+                    self.open.extend(library::get(self.library_host).all().iter().map(|k| k.vendor.to_lowercase()));
+                }
             }
         }
         Task::none()
     }
 
     fn animating(&self) -> bool {
-        let items = self.items.iter().any(|i| {
-            let rows = i.state.groups().len() as f32;
-            self.since(i.shown_at) < SLIDE + STAGGER * (rows + 1.0) + 0.05
-        });
         !self.started
-            || items
             || self.since(self.boot_at) < 0.8
             || self.since(self.page_at) < 0.6
             || self.since(self.hover_at) < 0.6
-    }
-
-    /// The n-th element of an item's reveal: (opacity, springy slide progress).
-    fn reveal(&self, item: &Item, n: usize) -> (f32, f32) {
-        let t = self.since(item.shown_at) - STAGGER * n as f32;
-        (ease_out_cubic(t / FADE), ease_out_back(t / SLIDE))
+            || self.since(self.list_at) < 1.2
+            || self.opened.as_ref().is_some_and(|(_, at)| self.since(*at) < 0.8)
     }
 
     /// Scale of the drop-zone icon: pops in at launch, swells while a file hovers.
@@ -382,10 +618,14 @@ impl App {
             Event::Window(window::Event::FileHovered(_)) => Some(Message::Hover(true)),
             Event::Window(window::Event::FilesHoveredLeft) => Some(Message::Hover(false)),
             Event::Window(window::Event::Focused) => Some(Message::Focused),
-            // Ctrl/⌘+O adds files, Ctrl/⌘+Enter converts.
+            Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+                Some(Message::Pick(None))
+            }
+            // Ctrl/⌘+O opens a project, Ctrl/⌘+Enter applies, Ctrl/⌘+F searches.
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() => match key.as_ref() {
                 keyboard::Key::Character("o") => Some(Message::Browse),
-                keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::Convert),
+                keyboard::Key::Character("f") => Some(Message::FocusSearch),
+                keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::Apply),
                 _ => None,
             },
             _ => None,
@@ -393,320 +633,23 @@ impl App {
         let frames = if self.animating() { window::frames().map(Message::Frame) } else { Subscription::none() };
         Subscription::batch([events, system::theme_changes().map(Message::Theme), frames])
     }
+}
 
-    // -------------------------------------------------------------- views
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn view(&self) -> Element<'_, Message> {
-        let page = match self.page {
-            Page::Convert => self.convert_page(),
-            Page::Supported => self.supported_page(),
-        };
-        let off = self.page_offset();
-        let page = container(page).padding(Padding { top: off.max(0.0), bottom: (-off).max(0.0), ..Padding::ZERO });
-        row![
-            self.sidebar(),
-            container(page).width(Length::Fill).height(Length::Fill).padding([24, 28]).style(|_| background()),
-        ]
-        .into()
-    }
-
-    fn sidebar(&self) -> Element<'_, Message> {
-        let p = p();
-        let nav_item = |label: &'static str, glyph: &'static str, page: Page, count: usize| {
-            let active = self.page == page;
-            let mut line = row![
-                container(t(glyph).size(13).color(if active { p.accent } else { p.text_2 }))
-                    .width(24)
-                    .center_x(24),
-                t(label).size(14).font(if active { SEMIBOLD } else { MEDIUM }).color(if active { p.text } else { p.text_2 }),
-                Space::new().width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            if count > 0 {
-                line = line.push(
-                    container(t(count.to_string()).size(11).font(SEMIBOLD).color(if active { p.on_accent } else { p.text_2 }))
-                        .padding([1, 7])
-                        .style(move |_| count_badge(active)),
-                );
-            }
-            button(line).width(Length::Fill).padding([9, 10]).on_press(Message::Nav(page)).style(move |_, s| nav(active, s))
-        };
-        let logo_row = row![
-            container(t("B").size(15).font(BOLD).color(p.panel)).width(30).height(30).center_x(30).center_y(30).style(|_| logo()),
-            column![t("Blacksmith").size(15).font(BOLD).color(p.text), t("VST2 → VST3").size(11).color(p.text_3)],
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
-        let shortcut = |keys: &'static str, what: &'static str| {
-            row![t(keys).size(11).font(MEDIUM).color(p.text_2), Space::new().width(Length::Fill), t(what).size(11).color(p.text_3)]
-        };
-        let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
-
-        container(
-            column![
-                logo_row,
-                Space::new().height(20),
-                nav_item("转换工程", "⇄", Page::Convert, self.items.len()),
-                nav_item("官方支持", "✓", Page::Supported, plugins::RULES.len()),
-                Space::new().height(Length::Fill),
-                shortcut(if cfg!(target_os = "macos") { "⌘ O" } else { "Ctrl O" }, "添加文件"),
-                shortcut(if cmd == "⌘" { "⌘ ↵" } else { "Ctrl ↵" }, "转换"),
-                Space::new().height(6),
-                t("FL Studio · .flp").size(11).color(p.text_3),
-            ]
-            .spacing(4),
-        )
-        .width(220)
-        .height(Length::Fill)
-        .padding(Padding { top: 20.0, right: 12.0, bottom: 16.0, left: 12.0 })
-        .style(|_| sidebar())
-        .into()
-    }
-
-    fn header<'a>(&self, title: String, subtitle: String, action: Option<Element<'a, Message>>) -> Element<'a, Message> {
-        let p = p();
-        let mut r = row![
-            column![t(title).size(22).font(BOLD).color(p.text), t(subtitle).size(13).color(p.text_2)]
-                .spacing(3)
-                .width(Length::Fill),
-        ]
-        .align_y(Alignment::Center);
-        if let Some(a) = action {
-            r = r.push(a);
+    #[test]
+    fn folders_are_searched_for_projects_but_not_backups_or_results() {
+        let dir = std::env::temp_dir().join(format!("blacksmith-scan-{}", std::process::id()));
+        for f in ["a/song.flp", "a/song (VST3).flp", "a/song (修复) 2.flp", "a/Backup/song (autosave).flp", "b/c/beat.FLP", "b/notes.txt"] {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
         }
-        r.into()
-    }
-
-    fn convert_page(&self) -> Element<'_, Message> {
-        let p = p();
-        let add = button(t("添加文件…").size(13).font(MEDIUM)).padding([9, 16]).on_press(Message::Browse).style(|_, s| secondary(s));
-
-        if self.items.is_empty() {
-            let h = self.hovering;
-            let d = 76.0 * self.icon_scale();
-            let icon = container(t("↓").size(34.0 * d / 76.0).font(BOLD).color(if h { p.on_accent } else { p.accent }))
-                .width(d)
-                .height(d)
-                .center_x(d)
-                .center_y(d)
-                .style(move |_| icon_circle(d, h));
-            let zone = container(center(
-                column![
-                    container(icon).width(110).height(110).center_x(110).center_y(110),
-                    t(if h { "松开即可分析" } else { "把 .flp 文件拖到这里" }).size(18).font(SEMIBOLD).color(p.text),
-                    t("先列出工程里的插件，确认后再转换。原文件不会被改动。").size(13).color(p.text_2),
-                    Space::new().height(10),
-                    button(t("选择文件…").size(14).font(SEMIBOLD))
-                        .padding([11, 22])
-                        .on_press(Message::Browse)
-                        .style(|_, s| primary(s)),
-                ]
-                .spacing(6)
-                .align_x(Alignment::Center),
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| drop_zone(h));
-            return column![
-                self.header("转换工程".into(), "FL Studio 工程里的 VST2 插件换成 VST3".into(), None),
-                zone,
-            ]
-            .spacing(18)
-            .into();
-        }
-
-        let ready = self.ready();
-        let done = self.items.iter().filter(|i| matches!(i.state, State::Done { .. })).count();
-        let subtitle = match (ready, done) {
-            (0, 0) => "这些工程里没有能升级的 VST2 插件".to_string(),
-            (0, d) => format!("已转换 {d} 个工程，结果另存在原文件旁边"),
-            (r, _) => format!("{} 个工程 · {r} 个插件待转换", self.items.len()),
-        };
-
-        let mut cards = Column::new().spacing(12).padding(Padding { right: 12.0, ..Padding::ZERO });
-        for (i, item) in self.items.iter().enumerate() {
-            cards = cards.push(self.card(i, item));
-        }
-        cards = cards.push(
-            container(t(if self.hovering { "松开即可添加" } else { "可以继续拖入 .flp 文件" }).size(12).color(if self.hovering {
-                p.accent
-            } else {
-                p.text_3
-            }))
-            .center_x(Length::Fill)
-            .padding(8),
-        );
-
-        let convert_label = if ready > 0 { format!("转换 {ready} 个插件") } else { "转换".into() };
-        let footer = row![
-            button(t("清空").size(13).font(MEDIUM)).padding([11, 14]).on_press(Message::Clear).style(|_, s| ghost(s)),
-            Space::new().width(Length::Fill),
-            button(t(convert_label).size(14).font(SEMIBOLD).center().width(Length::Fill))
-                .width(Length::Fixed(180.0))
-                .padding([11, 18])
-                .on_press_maybe((ready > 0).then_some(Message::Convert))
-                .style(|_, s| primary(s)),
-        ]
-        .align_y(Alignment::Center);
-
-        column![
-            self.header("转换工程".into(), subtitle, Some(add.into())),
-            scrollable(cards).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))).height(Length::Fill),
-            footer,
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    fn card<'a>(&self, index: usize, item: &'a Item) -> Element<'a, Message> {
-        let p = p();
-        let (a, slide) = self.reveal(item, 0);
-        let file = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let dir = item.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
-        let (chip, tone) = match &item.state {
-            State::Ready { .. } => ("待转换", Tone::Blue),
-            State::Done { .. } => ("已转换", Tone::Green),
-            State::Nothing { .. } => ("无需转换", Tone::Grey),
-            State::Failed(_) => ("出错", Tone::Red),
-        };
-        let remove = button(t("✕").size(13).color(fade(p.text_3, a)).center())
-            .width(30)
-            .height(30)
-            .padding(0)
-            .on_press(Message::Remove(index))
-            .style(|_, s| ghost(s));
-        let headline = match item.state {
-            State::Done { .. } => p.green,
-            State::Failed(_) => p.red,
-            _ => p.text_2,
-        };
-        let mut body = column![
-            row![
-                container(t("FL").size(12).font(BOLD).color(fade(p.accent, a)))
-                    .width(36)
-                    .height(36)
-                    .center_x(36)
-                    .center_y(36)
-                    .style(move |_| tile(a)),
-                column![t(file).size(15).font(SEMIBOLD).color(fade(p.text, a)), t(dir).size(11).color(fade(p.text_3, a))]
-                    .spacing(1)
-                    .width(Length::Fill),
-                pill(chip, tone, a),
-                remove,
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            t(item.state.headline()).size(12).color(fade(headline, a)),
-        ]
-        .spacing(8);
-
-        let groups = item.state.groups();
-        if !groups.is_empty() {
-            let mut list = Column::new().spacing(4);
-            for (i, (name, how, count)) in groups.iter().enumerate() {
-                let (a, k) = self.reveal(item, i + 1);
-                let (label, tone) = badge(how);
-                let mut left = row![t(name).size(13).font(MEDIUM).color(fade(p.text, a))].spacing(6).align_y(Alignment::Center);
-                if *count > 1 {
-                    left = left.push(t(format!("×{count}")).size(12).color(fade(p.text_3, a)));
-                }
-                list = list.push(
-                    container(
-                        row![left, Space::new().width(Length::Fill), pill(label, tone, a)]
-                            .align_y(Alignment::Center)
-                            .padding(Padding { left: 12.0 + 20.0 * (1.0 - k), ..Padding::from([7, 12]) }),
-                    )
-                    .style(move |_| row_style(a)),
-                );
-            }
-            body = body.push(list);
-        } else if !matches!(item.state, State::Failed(_)) {
-            body = body.push(t("工程里没有 VST 插件").size(12).color(fade(p.text_3, a)));
-        }
-        if let State::Done { out, .. } = &item.state {
-            body = body.push(row![
-                Space::new().width(Length::Fill),
-                button(t("在文件夹中显示").size(13).font(MEDIUM))
-                    .padding([8, 14])
-                    .on_press(Message::Reveal(out.clone()))
-                    .style(|_, s| secondary(s)),
-            ]);
-        }
-        // The card drops in from slightly below with a springy settle.
-        let lift = 16.0 * (1.0 - slide);
-        container(container(body).padding(16).width(Length::Fill).style(move |_| card(a)))
-            .padding(Padding { top: lift.max(0.0), bottom: (-lift).max(0.0), ..Padding::ZERO })
-            .into()
-    }
-
-    fn supported_page(&self) -> Element<'_, Message> {
-        let p = p();
-        let mut rules = Column::new().spacing(10);
-        for r in plugins::RULES {
-            rules = rules.push(
-                container(
-                    row![
-                        container(t(&r.name[..1]).size(16).font(BOLD).color(p.accent))
-                            .width(40)
-                            .height(40)
-                            .center_x(40)
-                            .center_y(40)
-                            .style(|_| tile(1.0)),
-                        column![
-                            row![t(r.name).size(15).font(SEMIBOLD).color(p.text), t(r.vendor).size(12).color(p.text_3)]
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            t(r.note).size(12).color(p.text_2),
-                        ]
-                        .spacing(3)
-                        .width(Length::Fill),
-                        pill("官方支持", Tone::Green, 1.0),
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Center),
-                )
-                .padding(14)
-                .style(|_| card(1.0)),
-            );
-        }
-
-        let legend = [
-            (How::Known(""), "有专门规则、在 FL 里验证过的插件"),
-            (How::Generic { derived: false }, "按 VST3 规范转换；VST3 的 ID 来自 FL 自己的记录或工程里已有的 VST3"),
-            (How::Generic { derived: true }, "按 VST3 规范转换；ID 按 Steinberg 规则推导，个别厂商（如 FabFilter）不遵守，可能打不开"),
-            (How::AlreadyVst3, "已经是 VST3，不动"),
-            (How::Skipped(String::new()), "无法转换，原样保留 VST2"),
-        ];
-        let mut explain = Column::new().spacing(10);
-        for (how, text) in legend {
-            let (label, tone) = badge(&how);
-            explain = explain.push(
-                row![
-                    container(pill(label.trim_end_matches(" · ").to_string(), tone, 1.0)).width(160),
-                    t(text).size(12).color(p.text_2).width(Length::Fill),
-                ]
-                .align_y(Alignment::Center),
-            );
-        }
-
-        column![
-            self.header("官方支持".into(), "这些插件有专门的转换规则，音色和设置会原样迁移".into(), None),
-            scrollable(
-                column![
-                    rules,
-                    Space::new().height(6),
-                    t("标签说明").size(14).font(SEMIBOLD).color(p.text),
-                    container(explain).padding(16).style(|_| card(1.0)),
-                    t("想加新的官方支持：提供插件的 VST2 和 VST3，以及一个两种格式都加载了同一个预设的工程。").size(12).color(p.text_3),
-                ]
-                .spacing(12)
-                .padding(Padding { right: 12.0, ..Padding::ZERO }),
-            )
-            .direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4)))
-            .height(Length::Fill),
-        ]
-        .spacing(18)
-        .into()
+        let found: Vec<String> =
+            projects_in(vec![dir.clone()]).iter().map(|p| p.strip_prefix(&dir).unwrap().display().to_string()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, ["a/song.flp", "b/c/beat.FLP"]);
     }
 }

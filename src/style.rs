@@ -1,12 +1,14 @@
-//! Look: neutral surfaces that follow the system's light/dark setting, one
-//! calm blue accent, generous hit targets. Read the palette anywhere with `p()`.
+//! Look: neutral, near-monochrome surfaces that follow the system's light/dark
+//! setting; the primary action is ink on paper (black in light mode, white in
+//! dark); colour only marks status. Hairline borders, flat cards, generous hit
+//! targets. Read the palette anywhere with `p()`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::border::Radius;
 use iced::widget::text::Shaping;
-use iced::widget::{Text, button, container, text};
-use iced::{Background, Border, Color, Element, Font, Shadow, Vector, font};
+use iced::widget::{Row, Text, button, container, row, rule, text, text_input};
+use iced::{Alignment, Background, Border, Color, Element, Font, Shadow, font};
 
 use crate::Message;
 
@@ -31,16 +33,12 @@ pub struct Palette {
     pub text: Color,
     pub text_2: Color,
     pub text_3: Color,
-    pub accent: Color,
-    pub accent_hover: Color,
     pub accent_soft: Color,
-    pub on_accent: Color,
     pub green: Color,
     pub blue: Color,
     pub amber: Color,
     pub red: Color,
     pub grey: Color,
-    pub shadow: f32,
 }
 
 pub const LIGHT: Palette = Palette {
@@ -55,16 +53,12 @@ pub const LIGHT: Palette = Palette {
     text: rgb(0x15171A),
     text_2: rgb(0x5F6672),
     text_3: rgb(0x9097A1),
-    accent: rgb(0x2563EB),
-    accent_hover: rgb(0x1D4FD8),
     accent_soft: rgb(0xE8EFFE),
-    on_accent: rgb(0xFFFFFF),
     green: rgb(0x1A7F45),
     blue: rgb(0x2563EB),
     amber: rgb(0xB45309),
     red: rgb(0xB42318),
     grey: rgb(0x5F6672),
-    shadow: 0.06,
 };
 
 pub const DARK: Palette = Palette {
@@ -79,16 +73,12 @@ pub const DARK: Palette = Palette {
     text: rgb(0xEDEEF0),
     text_2: rgb(0xA4A9B1),
     text_3: rgb(0x70757D),
-    accent: rgb(0x4C86F7),
-    accent_hover: rgb(0x6A9BFA),
     accent_soft: rgb(0x1E2B45),
-    on_accent: rgb(0xFFFFFF),
     green: rgb(0x5FD38D),
     blue: rgb(0x8AB4FF),
     amber: rgb(0xF5B35C),
     red: rgb(0xFF8A80),
     grey: rgb(0xA4A9B1),
-    shadow: 0.3,
 };
 
 static IS_DARK: AtomicBool = AtomicBool::new(false);
@@ -133,34 +123,63 @@ pub fn sidebar() -> container::Style {
     }
 }
 
-/// A card; `a` fades it in.
+/// A flat card with a hairline border; `a` fades it in.
 pub fn card(a: f32) -> container::Style {
     let p = p();
     container::Style {
         background: Some(Background::Color(fade(p.panel, a))),
-        border: Border { color: fade(p.border, a), width: 1.0, radius: radius(12.0) },
-        shadow: Shadow { color: fade(Color::BLACK, p.shadow * a), offset: Vector::new(0.0, 2.0), blur_radius: 8.0 },
+        border: Border { color: fade(p.border, a), width: 1.0, radius: radius(10.0) },
         ..Default::default()
     }
 }
 
-pub fn row_style(a: f32) -> container::Style {
+/// A quiet grey box for notes and the step number circles.
+pub fn note() -> container::Style {
+    let p = p();
     container::Style {
-        background: Some(Background::Color(fade(p().row, a))),
-        border: Border { radius: radius(8.0), ..Default::default() },
+        background: Some(Background::Color(p.row)),
+        border: Border { color: p.border, width: 1.0, radius: radius(8.0) },
         ..Default::default()
     }
 }
+
+pub fn step_number() -> container::Style {
+    let p = p();
+    container::Style {
+        background: Some(Background::Color(p.row)),
+        border: Border { color: p.border, width: 1.0, radius: radius(99.0) },
+        ..Default::default()
+    }
+}
+
+/// The bar above each page's content.
+pub fn top_bar() -> container::Style {
+    container::Style { background: Some(Background::Color(p().bg)), ..Default::default() }
+}
+
+/// A hairline separator.
+pub fn hairline<'a>() -> Element<'a, Message> {
+    rule::horizontal(1)
+        .style(|_| rule::Style { color: p().border, radius: radius(0.0), fill_mode: rule::FillMode::Full, snap: true })
+        .into()
+}
+
+/// Table header cell text.
+pub fn th<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    t(s).size(11).font(MEDIUM).color(p().text_3)
+}
+
+
 
 /// The drop target; highlighted while a file is dragged over the window.
 pub fn drop_zone(hovering: bool) -> container::Style {
     let p = p();
     container::Style {
-        background: Some(Background::Color(if hovering { p.accent_soft } else { p.panel })),
+        background: Some(Background::Color(if hovering { p.row } else { p.panel })),
         border: Border {
-            color: if hovering { p.accent } else { p.border_strong },
-            width: if hovering { 2.0 } else { 1.0 },
-            radius: radius(16.0),
+            color: if hovering { p.text_2 } else { p.border_strong },
+            width: 1.0,
+            radius: radius(10.0),
         },
         ..Default::default()
     }
@@ -169,19 +188,12 @@ pub fn drop_zone(hovering: bool) -> container::Style {
 pub fn icon_circle(size: f32, hovering: bool) -> container::Style {
     let p = p();
     container::Style {
-        background: Some(Background::Color(if hovering { p.accent } else { p.accent_soft })),
-        border: Border { radius: radius(size / 2.0), ..Default::default() },
+        background: Some(Background::Color(if hovering { p.text } else { p.row })),
+        border: Border { color: p.border, width: if hovering { 0.0 } else { 1.0 }, radius: radius(size / 2.0) },
         ..Default::default()
     }
 }
 
-pub fn tile(a: f32) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(fade(p().accent_soft, a))),
-        border: Border { radius: radius(8.0), ..Default::default() },
-        ..Default::default()
-    }
-}
 
 pub fn logo() -> container::Style {
     container::Style {
@@ -194,7 +206,7 @@ pub fn logo() -> container::Style {
 pub fn count_badge(active: bool) -> container::Style {
     let p = p();
     container::Style {
-        background: Some(Background::Color(if active { p.accent } else { p.selected })),
+        background: Some(Background::Color(if active { p.panel } else { p.selected })),
         border: Border { radius: radius(99.0), ..Default::default() },
         ..Default::default()
     }
@@ -224,33 +236,72 @@ impl Tone {
     }
 }
 
-pub fn pill<'a>(label: impl text::IntoFragment<'a>, tone: Tone, a: f32) -> Element<'a, Message> {
-    let c = tone.color();
-    container(t(label).size(11).font(MEDIUM).color(fade(c, a)))
-        .padding([3, 10])
-        .style(move |_| container::Style {
-            background: Some(Background::Color(fade(c, 0.12 * a))),
-            border: Border { radius: radius(99.0), ..Default::default() },
-            ..Default::default()
-        })
-        .into()
+impl Tone {
+    /// The mark in front of a status: ✓ done or fine, → will change, ⚠ needs
+    /// attention, – nothing to do, ✕ failed.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Tone::Green => "✓",
+            Tone::Blue => "→",
+            Tone::Amber => "⚠",
+            Tone::Grey => "–",
+            Tone::Red => "✕",
+        }
+    }
 }
+
+/// A status as livesaver-style mark + words: colour on the mark only.
+pub fn status<'a>(label: impl text::IntoFragment<'a>, tone: Tone, a: f32) -> Row<'a, Message> {
+    let p = p();
+    row![
+        t(tone.glyph()).size(12).font(SEMIBOLD).color(fade(tone.color(), a)),
+        t(label).size(12).color(fade(if matches!(tone, Tone::Grey) { p.text_3 } else { p.text }, a)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+}
+
 
 // ------------------------------------------------------------------ buttons
 
-/// Primary action: accent fill.
+/// Primary action: ink on paper (near-black in light mode, near-white in dark).
 pub fn primary(s: button::Status) -> button::Style {
     let p = p();
     let bg = match s {
-        button::Status::Hovered | button::Status::Pressed => p.accent_hover,
+        button::Status::Hovered | button::Status::Pressed => fade(p.text, 0.82),
         button::Status::Disabled => p.selected,
-        button::Status::Active => p.accent,
+        button::Status::Active => p.text,
     };
     button::Style {
         background: Some(Background::Color(bg)),
-        text_color: if s == button::Status::Disabled { p.text_3 } else { p.on_accent },
-        border: Border { radius: radius(10.0), ..Default::default() },
+        text_color: if s == button::Status::Disabled { p.text_3 } else { p.panel },
+        border: Border { radius: radius(8.0), ..Default::default() },
         shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+/// A tab in a segmented row: the active one is a raised panel.
+pub fn tab(active: bool, s: button::Status) -> button::Style {
+    let p = p();
+    button::Style {
+        background: if active {
+            Some(Background::Color(p.panel))
+        } else {
+            (s == button::Status::Hovered).then_some(Background::Color(p.hover))
+        },
+        text_color: if active { p.text } else { p.text_2 },
+        border: Border { color: if active { p.border } else { Color::TRANSPARENT }, width: 1.0, radius: radius(7.0) },
+        ..Default::default()
+    }
+}
+
+/// The track the tabs sit in.
+pub fn tabs() -> container::Style {
+    let p = p();
+    container::Style {
+        background: Some(Background::Color(p.row)),
+        border: Border { color: p.border, width: 1.0, radius: radius(9.0) },
         ..Default::default()
     }
 }
@@ -260,7 +311,7 @@ pub fn secondary(s: button::Status) -> button::Style {
     button::Style {
         background: Some(Background::Color(if s == button::Status::Hovered { p.hover } else { p.panel })),
         text_color: if s == button::Status::Disabled { p.text_3 } else { p.text },
-        border: Border { color: p.border_strong, width: 1.0, radius: radius(10.0) },
+        border: Border { color: p.border_strong, width: 1.0, radius: radius(8.0) },
         ..Default::default()
     }
 }
@@ -285,4 +336,56 @@ pub fn nav(active: bool, s: button::Status) -> button::Style {
         None
     };
     button::Style { background: bg, border: Border { radius: radius(8.0), ..Default::default() }, ..Default::default() }
+}
+
+// ------------------------------------------------------------------ inputs
+
+/// A tick box: ink when ticked, like the primary button.
+pub fn tick(s: iced::widget::checkbox::Status) -> iced::widget::checkbox::Style {
+    use iced::widget::checkbox::Status;
+    let p = p();
+    let (checked, hovered, disabled) = match s {
+        Status::Active { is_checked } => (is_checked, false, false),
+        Status::Hovered { is_checked } => (is_checked, true, false),
+        Status::Disabled { is_checked } => (is_checked, false, true),
+    };
+    iced::widget::checkbox::Style {
+        background: Background::Color(if checked && !disabled { p.text } else if hovered { p.hover } else { p.panel }),
+        icon_color: p.panel,
+        border: Border { color: if checked { p.text } else { p.border_strong }, width: 1.0, radius: radius(4.0) },
+        text_color: None,
+    }
+}
+
+/// The dimmed backdrop behind a dialog.
+pub fn backdrop() -> container::Style {
+    container::Style { background: Some(Background::Color(Color { a: 0.35, ..Color::BLACK })), ..Default::default() }
+}
+
+/// A dialog panel.
+pub fn dialog() -> container::Style {
+    let p = p();
+    container::Style {
+        background: Some(Background::Color(p.panel)),
+        border: Border { color: p.border_strong, width: 1.0, radius: radius(12.0) },
+        shadow: Shadow { color: Color { a: 0.25, ..Color::BLACK }, offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
+        ..Default::default()
+    }
+}
+
+pub fn search_field(s: text_input::Status) -> text_input::Style {
+    let p = p();
+    let focused = matches!(s, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: Background::Color(p.panel),
+        border: Border {
+            color: if focused { p.text_2 } else { p.border_strong },
+            width: 1.0,
+            radius: radius(8.0),
+        },
+        icon: p.text_3,
+        placeholder: p.text_3,
+        value: p.text,
+        selection: p.accent_soft,
+    }
 }

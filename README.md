@@ -1,51 +1,63 @@
 # Blacksmith
 
-Drop an FL Studio project in, get a copy with its VST2 plugins swapped for
-their VST3 versions — same sounds, same settings. The original is never
-touched: the result is saved next to it as `<name> (VST3).flp`.
+Drop an FL Studio project (`.flp`) or Ableton Live set (`.als`) in and see, for every plugin it
+uses, whether FL or Live on this computer can open it — and fix what it can't: upgrade VST2 plugins to VST3 with the same
+sound and settings, or point a plugin saved under an ID you don't have at the plugin you do have.
+Nothing is written until you press 应用; the result is saved next to the project as
+`<name> (修复).flp`, and the original is never touched.
 
-Drop projects in (or use 选择文件…): Blacksmith first lists every VST plugin in
-each project, then writes the upgraded copies when you press 转换:
+## 检查工程
 
-| Badge     | Meaning |
-|-----------|---------|
-| 官方支持   | A plugin with its own tested rule (`src/plugins.rs`). Currently: Serum. |
-| 通用转换   | Generic conversion following Steinberg's VST2→VST3 spec; not verified for this plugin, check it in FL. `· 推导 ID`: the VST3 ID was derived, not known. |
-| 已是 VST3  | Already VST3, left alone. |
-| 跳过       | Couldn't be converted (reason shown). |
+One table, one row per plugin in the project:
+
+| Column | |
+|---|---|
+| 状态 | ✓ 已安装 (FL finds it here, by format and ID) · ⚠ ID 对不上 (that VST3 ID isn't installed, but a plugin of the same name and vendor is) · ✕ 未安装 · VST2 (installed or not) |
+| 可以做什么 | 升级到 VST3 · 改成已装的插件 · 选择已装的插件… (pick any installed plugin yourself) |
+| 官方支持 / 未验证 | Official rules (`src/plugins.rs`, currently Serum and OTT) are checked in FL: the plugin loads with its settings. Everything else is marked 未验证: FL finds the plugin, but whether it reads the state hasn't been tried. |
+
+Tick or untick each row; fixes that would leave a plugin FL can't find (an upgrade to a VST3 that
+isn't installed) start unticked.
+
+## Plugin library
+
+Each host gets its own library. What counts as installed comes from, in order:
+
+1. **The host's own plugin database** on your computer — FL Studio's
+   (`Documents/Image-Line/FL Studio/Presets/Plugin database/Installed`, text files) or Live's
+   (`Ableton/Live Database/Live-plugins-1.db`, read-only) — exactly what that host can load.
+   Entries whose file is gone are ignored.
+2. **The standard plugin folders** (`/Library/Audio/Plug-Ins/VST3` etc. on a Mac,
+   `Common Files\VST3` etc. on Windows): what is on disk, plus the class IDs a VST3 states in its
+   `moduleinfo.json`. They fill in IDs FL didn't record and show plugins FL hasn't scanned yet.
+3. A built-in list (`assets/known_ids.tsv`) of VST2 → VST3 pairs, used for converting.
+
+Only files are read; no plugin is loaded. The 已安装插件 page shows what each source found.
 
 ```
-blacksmith song.flp other.flp   # no window, prints the same report
+blacksmith song.flp folder/        # no window: check only, writes nothing
+blacksmith --apply song.flp        # …and save the default fixes as "song (修复).flp"
+blacksmith --library               # the plugin library in use
+blacksmith --dump song.flp         # every VST instance (IDs, paths, state)
+blacksmith --dump song.flp "song (修复) re-saved in FL.flp"   # did the settings carry over?
 ```
+
+In Live sets, Blacksmith currently fixes VST3 IDs (to the installed plugin of the same name, or one
+you pick). VST2 → VST3 for Live is not done yet: Live stores plugin state differently.
 
 ## How it works
 
-FL stores each wrapped plugin as a list of records: identity (VST2 unique ID
-or VST3 class ID), binary path, and saved state. Converting an instance means
-swapping the identity and path for the VST3 ones and moving the state into
-FL's VST3 layout (header · component state · parameter-ID table).
+FL stores each wrapped plugin as a list of records: identity (VST2 unique ID or VST3 class ID),
+binary path, and saved state. FL finds a plugin by format and ID, never by name.
 
-**Known plugins** (`src/plugins.rs`) have an exact class ID, a built-in
-template taken from a real FL project, and a state conversion verified in FL.
-Serum's VST3 reads its VST2 chunk unchanged.
-
-**Everything else** goes through the generic path. It reads nothing but the
-project — VST2/VST3 installs are often messy or mismatched, so the machine is
-never scanned:
-
-1. *VST3 class ID:* FL's own record of it (FL stores one on a VST2 instance
-   when its plugin manager pairs the two formats); else a VST3 instance of the
-   same plugin in the project; else Steinberg's rule (`"VST"` + VST2 ID + first
-   9 letters of the lower-case name), shown as **通用转换 · 推导 ID** because some
-   vendors (e.g. FabFilter) don't follow it.
-2. *State:* handed over the way Cubase does and the SDK's `tryVst2StateLoad`
-   expects — a `VstW` header plus an FXB bank: a chunk bank for chunk-based
-   plugins, or one program of parameter values for the rest.
-3. *Parameters:* VST3 parameter ID = VST2 parameter index, as the spec
-   requires, so automation keeps pointing at the same controls.
-
-The list of officially supported plugins and what each badge means is in the
-app (官方支持列表).
+- **Upgrading** a VST2 swaps the identity and path for the VST3's and moves the state into FL's
+  VST3 layout (header · component state · parameter-ID table). Official rules have an exact
+  template and state conversion. Otherwise the state is handed over the way the VST3 SDK's
+  `tryVst2StateLoad` expects (a `VstW` header plus an FXB bank), with VST3 parameter ID = VST2
+  parameter index so automation keeps its targets. The VST3's ID comes from a VST3 instance in
+  the project, the plugin library, FL's own record, or Steinberg's naming rule, in that order.
+- **Changing an ID** points a VST3 instance at the installed plugin's class ID and keeps its
+  state; official rules also convert the state of older builds (OTT).
 
 ## Build
 

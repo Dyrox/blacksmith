@@ -5,8 +5,10 @@ edition = "2024"
 description = "Drop a DAW project in, get it back with VST2 plugins upgraded to VST3."
 
 [dependencies]
+flate2 = "1.1.11"
 iced = "0.14"
 rfd = "0.18"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
