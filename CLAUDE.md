@@ -186,4 +186,6 @@ instance's records (state record 3 emptied) into `assets/<plugin>-vst3-template.
 - Windows exe from Linux without rustup targets: build std from source with
   `RUSTC_BOOTSTRAP=1 cargo build --release -Zbuild-std=std,panic_abort --target x86_64-pc-windows-gnu`
   and `linker = "x86_64-w64-mingw32-gcc"` (needs rust-src matching the compiler).
-- CI (`.github/workflows/release.yml`) builds Windows + macOS and releases on push to main.
+- CI (`.github/workflows/release.yml`) builds Windows + macOS and releases on push to main. The
+  release notes list every commit subject since the previous `v*` tag, so write subjects for users
+  (what changed, not how). Curated notes can replace them afterwards with `gh release edit`.

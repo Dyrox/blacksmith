@@ -99,6 +99,32 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The changelog: every commit since the previous release, by its subject.
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
+          range=${prev:+$prev..}HEAD
+          {
+            echo "**Blacksmith — 工程文件医生.** The project doctor for FL Studio and Ableton Live."
+            echo
+            echo "## 更新内容"
+            echo
+            git log "$range" --no-merges --format='- %s'
+            echo
+            if [ -n "$prev" ]; then
+              echo "**完整变更**：https://github.com/$REPO/compare/$prev...v$VERSION"
+              echo
+            fi
+            echo "---"
+            echo "Not signed by Apple or Microsoft yet. macOS, first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway."
+          } > notes.md
+          cat notes.md
       - uses: actions/download-artifact@v5
         with:
           path: artifacts
@@ -109,7 +135,4 @@ jobs:
           name: Blacksmith ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           files: artifacts/*
-          body: |
-            **Blacksmith — 工程文件医生.** The project doctor for FL Studio and Ableton Live: open a project, see which plugins won't open on this computer, and save a repaired copy.
-
-            Not signed by Apple or Microsoft yet. macOS, first launch: right-click Blacksmith → Open. Windows SmartScreen: More info → Run anyway.
+          body_path: notes.md
