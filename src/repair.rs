@@ -83,14 +83,27 @@ fn with_class_id(old: &[(u32, Vec<u8>)], class_id: &[u8]) -> Records {
 /// Moves a VST3 instance from an older build's class ID to the current one:
 /// new ID, state converted by the rule, the current build's parameter table.
 fn relink(old: &[(u32, Vec<u8>)], rule: &plugins::Rule, alias: &plugins::Alias, in_project: &[Records]) -> Option<Records> {
-    let state = get(old, STATE)?;
-    let records = read_records(state.get(4..)?)?;
-    let component = (alias.state)(get(&records, VST3_COMPONENT)?)?;
-    let target = in_project
-        .iter()
-        .find(|r| get(r, CLASS_ID) == Some(&rule.class_id[..]))
-        .and_then(|r| Target::from_instance(r))
-        .unwrap_or_else(|| rule.builtin_target());
+    let target = target_in(in_project, &rule.class_id).unwrap_or_else(|| rule.builtin_target());
+    move_vst3(old, &target, alias.state, None)
+}
+
+/// A VST3 instance of this class ID already in the project, as a target.
+pub fn target_in(in_project: &[Records], class_id: &[u8]) -> Option<Target> {
+    in_project.iter().find(|r| get(r, CLASS_ID) == Some(class_id)).and_then(|r| Target::from_instance(r))
+}
+
+/// Moves a VST3 instance to `target`'s class ID: its component state through
+/// `state`, the target's parameter table. `name`: also take the target's name
+/// and path (another product, not another build of the same one).
+pub fn move_vst3(
+    old: &[(u32, Vec<u8>)],
+    target: &Target,
+    state: fn(&[u8]) -> Option<Vec<u8>>,
+    name: Option<&str>,
+) -> Option<Records> {
+    let saved = get(old, STATE)?;
+    let records = read_records(saved.get(4..)?)?;
+    let component = state(get(&records, VST3_COMPONENT)?)?;
     let params = target.state.as_ref().and_then(|s| get(s, VST3_PARAM_IDS));
     let new_state: Records = records
         .iter()
@@ -100,11 +113,14 @@ fn relink(old: &[(u32, Vec<u8>)], rule: &plugins::Rule, alias: &plugins::Alias, 
             _ => (*id, d.clone()),
         })
         .collect();
-    let version = u32::from_le_bytes(state.get(..4)?.try_into().ok()?);
-    let mut out = with_class_id(old, &rule.class_id);
+    let version = u32::from_le_bytes(saved.get(..4)?.try_into().ok()?);
+    let mut out = with_class_id(old, &target.class_id);
     for (id, d) in &mut out {
-        if *id == STATE {
-            *d = write_records(version, &new_state);
+        match (*id, name) {
+            (STATE, _) => *d = write_records(version, &new_state),
+            (NAME, Some(n)) => *d = n.as_bytes().to_vec(),
+            (PATH, Some(_)) if !target.path.is_empty() => *d = target.path.as_bytes().to_vec(),
+            _ => {}
         }
     }
     Some(out)
@@ -152,6 +168,23 @@ mod tests {
         assert_eq!(&comp[4..8], &(1.0f32 / 40.0).to_le_bytes());
         assert_eq!(get(&st, VST3_PARAM_IDS).unwrap().len(), 88);
         assert_eq!(get(&st, VST3_HEADER), Some(&[1u8; 64][..]));
+    }
+
+    #[test]
+    fn upgrade_moves_to_another_product() {
+        // Kontakt (6) → Kontakt 8: new ID, name and path, the state as it was,
+        // Kontakt 8's parameter table.
+        let up = crate::upgrades::from(b"NTSV$ikDontakt\0\0").unwrap();
+        let state = write_records(1, &[(VST3_HEADER, vec![1; 64]), (VST3_COMPONENT, b"hsin...".to_vec()), (VST3_PARAM_IDS, vec![0; 8])]);
+        let mut old = read_records(&vst3(&up.from, "Kontakt", "Native Instruments", state)[4..]).unwrap();
+        old.push((PATH, b"/Library/Audio/Plug-Ins/VST3/Kontakt.vst3".to_vec()));
+        let new = move_vst3(&old, &up.builtin_target(), up.state, Some(up.to_name)).unwrap();
+        assert_eq!(get(&new, CLASS_ID), Some(&up.to[..]));
+        assert_eq!(get(&new, NAME), Some(&b"Kontakt 8"[..]));
+        assert!(get(&new, PATH).unwrap().ends_with(b"Kontakt 8.vst3"));
+        let st = read_records(&get(&new, STATE).unwrap()[4..]).unwrap();
+        assert_eq!(get(&st, VST3_COMPONENT), Some(&b"hsin..."[..]));
+        assert!(get(&st, VST3_PARAM_IDS).unwrap().len() > 8);
     }
 
     #[test]

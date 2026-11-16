@@ -16,6 +16,7 @@ mod platform;
 mod plugins;
 mod repair;
 mod style;
+mod upgrades;
 mod view;
 mod vst3;
 
@@ -68,10 +69,13 @@ fn main() -> iced::Result {
         return Ok(());
     }
     // `blacksmith a.flp b.als folder …` checks without a window and writes nothing;
-    // with `--apply` it also saves the default fixes, like pressing 应用.
+    // `--apply` saves the default fixes (like pressing 应用), `--apply-all`
+    // every available one, unverified included, keeping settings (dev aid).
     if !files.is_empty() {
-        let apply = files.iter().any(|f| f.as_os_str() == "--apply");
-        let files: Vec<PathBuf> = files.into_iter().filter(|f| f.as_os_str() != "--apply").collect();
+        let flag = |f: &PathBuf| f.as_os_str() == "--apply" || f.as_os_str() == "--apply-all";
+        let all = files.iter().any(|f| f.as_os_str() == "--apply-all");
+        let apply = files.iter().any(flag);
+        let files: Vec<PathBuf> = files.into_iter().filter(|f| !flag(f)).collect();
         for f in projects_in(files) {
             let before = match analyse(&f) {
                 ProjectState::Checked { findings, .. } => findings,
@@ -87,7 +91,12 @@ fn main() -> iced::Result {
                     format!("{}× {} [{}{fix}]", x.instances, x.plugin.name, status_label(&x.status).0)
                 })
                 .collect();
-            let state = if apply { save(&f, &Choices::new()) } else { analyse(&f) };
+            let choices: Choices = if all {
+                before.iter().filter(|x| x.fix.is_some()).map(|x| (x.plugin.clone(), Choice::On { reset: false })).collect()
+            } else {
+                Choices::new()
+            };
+            let state = if apply { save(&f, &choices) } else { analyse(&f) };
             println!("{}  {}  {}", f.display(), state.headline(), list.join(", "));
         }
         return Ok(());
@@ -250,6 +259,7 @@ fn fix_label(fix: &Fix) -> String {
         Fix::Upgrade { target, installed: false, .. } => format!("升级到 {target} VST3（这台电脑没装）"),
         Fix::Relink { rule } => format!("改成已装的 {rule}"),
         Fix::Rename { target } => format!("改成已装的 {target}"),
+        Fix::Migrate { to, .. } => format!("升级到 {to}（换成新插件）"),
     }
 }
 

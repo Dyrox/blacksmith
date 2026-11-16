@@ -27,6 +27,12 @@ light and ergonomic; neutral colours following system light/dark; springy
   target): VST2 state parsing, VST3 record building, FXB wrapping.
 - `src/plugins.rs` — 官方支持 rules (Serum, OTT). Each rule: VST2 FourCC, VST3 class ID, built-in template
   (`assets/*.bin`), state transform, and a note shown in the app.
+- `src/upgrades.rs` — 升级插件: rules moving a plugin to a different, newer product (Kontakt →
+  Kontakt 8; later Serum → Serum 2…): both class IDs, the target's FL template
+  (`assets/<plugin>-vst3-template.bin`), state transform, `verified`. Shown as `Fix::Migrate`
+  (always opt-in) in FL (`repair::move_vst3`: new ID, name, path, param table) and Live
+  (`als::upgraded`: Uid, info `<Name>`, `<ProcessorState>` through the transform). A new upgrade
+  needs a project with both plugins holding the same sound.
 - `src/vst3.rs` — Steinberg's derived class ID and default VST3 paths.
 - `src/livedb.rs` — reads Live's plugin database (`Live Database/Live-plugins-<n>.db`, SQLite via
   rusqlite, read-only): `device:vst:<kind>:<id>?n=…` / `device:vst3:<kind>:<FUID>`.
@@ -58,7 +64,8 @@ Dev CLI: `blacksmith --dump a.flp` lists VST instances; `blacksmith --dump orig.
 compares the original with FL's re-save of the converted copy (each loaded VST3 writes its own
 state on save, so this shows whether the settings carried over).
 
-`blacksmith --library` prints both hosts' libraries (and where they came from).
+`blacksmith --apply-all x.flp` saves every available change, unverified ones too, keeping settings
+(dev aid for producing test files). `blacksmith --library` prints both hosts' libraries (and where they came from).
 
 The project is analysed off the UI thread. The CLI searches folders for `.flp`, skipping `Backup`
 folders and Blacksmith's own `(修复)` (and older `(VST3)`) copies.
@@ -136,6 +143,15 @@ Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<f
   the reset option. With 重置设置 (`<ProcessorState />`) the same set opens in Live 12.2.1 (checked
   by the owner, Nov 2026). A proper Ample rule needs a set saved by the new build to compare.
 - Phase 2 (not done): VST2 → VST3 in sets needs `<Buffer>` → `<ProcessorState>` per plugin.
+
+## Kontakt (6) → Kontakt 8 (test project `test-projects/kontakt vs kontakt 8/`)
+
+- Both VST3: Kontakt `NTSV$ikDontakt` (state says 6.7.0.0), Kontakt 8 `NTSVKik8ontakt 8` (8.5.0.0).
+  States are NI `hsin` containers with the same layout but compressed contents (0.4% bytes shared),
+  so no byte-level conversion: the old state goes to Kontakt 8 as is. Verified by the owner in
+  FL Studio 2025 (Nov 2026): opens with the same instrument and sound.
+- FL's DB lists Kontakt 8 without a class ID, so `Upgrade::installed_in` also accepts a by-file match.
+- Record 32 (I/O layout) differs (708 vs 384 bytes); the old one is kept.
 
 ## Plugin sources — why not just scan folders
 

@@ -4,7 +4,7 @@
 //! it), a built-in template (a VST3 instance's records from a real FL project,
 //! with an empty component state), and how its VST2 state becomes VST3 state.
 
-use crate::convert::{STATE, Target, Vst2State, get, plugin_records};
+use crate::convert::{PATH, STATE, Target, Vst2State, get, plugin_records};
 use crate::flp::read_records;
 
 pub struct Rule {
@@ -48,10 +48,16 @@ impl Rule {
     }
 
     pub fn builtin_target(&self) -> Target {
-        let records = plugin_records(self.template).expect("built-in template");
-        let state = get(&records, STATE).and_then(|s| s.get(4..)).and_then(read_records);
-        Target { class_id: self.class_id.to_vec(), path: String::from_utf8_lossy(get(&records, 55).unwrap_or_default()).into_owned(), state }
+        template_target(&self.class_id, self.template)
     }
+}
+
+/// A VST3 target from a built-in template (an FL instance's records with an
+/// empty component state).
+pub fn template_target(class_id: &[u8], template: &[u8]) -> Target {
+    let records = plugin_records(template).expect("built-in template");
+    let state = get(&records, STATE).and_then(|s| s.get(4..)).and_then(read_records);
+    Target { class_id: class_id.to_vec(), path: String::from_utf8_lossy(get(&records, PATH).unwrap_or_default()).into_owned(), state }
 }
 
 pub const RULES: &[Rule] = &[

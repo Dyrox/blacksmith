@@ -7,7 +7,7 @@ use crate::check::{self, Choice, Choices, Finding, Fix, Format, Plugin, Status};
 use crate::convert::{self, CLASS_ID, How, NAME, PLUGIN_DATA, STATE, VENDOR, get, plugin_records, text, wrapper_version};
 use crate::flp::{Project, Records, write_records};
 use crate::library::{Entry, Library};
-use crate::{plugins, repair};
+use crate::{plugins, repair, upgrades};
 
 /// The plugin an instance names.
 fn plugin_of(records: &[(u32, Vec<u8>)]) -> Option<Plugin> {
@@ -36,15 +36,22 @@ fn assess(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, in_project: &[
             });
             (Status::Vst2 { installed: lib.vst2_installed(fourcc) }, fix)
         }
-        Format::Vst3 => match repair::repair_instance(lib, old, in_project).1 {
-            How::Recognized => (Status::Installed, None),
-            How::Relinked(rule) => (Status::Mismatch, Some(Fix::Relink { rule })),
-            How::Reidentified => {
-                let target = lib.matching(&plugin.name, &plugin.vendor).first().map(|k| k.name.to_string());
-                (Status::Mismatch, Some(Fix::Rename { target: target.unwrap_or_default() }))
+        Format::Vst3 => {
+            let (status, fix) = match repair::repair_instance(lib, old, in_project).1 {
+                How::Recognized => (Status::Installed, None),
+                How::Relinked(rule) => (Status::Mismatch, Some(Fix::Relink { rule })),
+                How::Reidentified => {
+                    let target = lib.matching(&plugin.name, &plugin.vendor).first().map(|k| k.name.to_string());
+                    (Status::Mismatch, Some(Fix::Rename { target: target.unwrap_or_default() }))
+                }
+                _ => (Status::Missing, None),
+            };
+            // A newer product that's installed here beats a rename.
+            match upgrades::from(&plugin.id).filter(|u| u.installed_in(lib)) {
+                Some(u) => (status, Some(Fix::Migrate { to: u.to_name, verified: u.verified })),
+                None => (status, fix),
             }
-            _ => (Status::Missing, None),
-        },
+        }
     }
 }
 
@@ -70,6 +77,11 @@ fn change(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, choice: Option
     let (_, fix) = assess(lib, old, plugin, in_project);
     let decision = check::decide(fix.as_ref(), choice)?;
     let records = match (decision.pick, plugin.format) {
+        (None, Format::Vst3) if matches!(fix, Some(Fix::Migrate { .. })) => {
+            let up = upgrades::from(&plugin.id)?;
+            let target = repair::target_in(in_project, &up.to).unwrap_or_else(|| up.builtin_target());
+            repair::move_vst3(old, &target, up.state, Some(up.to_name))?
+        }
         (Some(class_id), Format::Vst2) => {
             let target: &Entry = lib.by_class_id(&class_id)?;
             convert::upgrade_instance(lib, old, in_project, Some(target)).ok()?.records

@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::check::Format;
 use crate::library::{self, Host};
+use crate::upgrades;
 use crate::style::*;
 use crate::*;
 
@@ -33,9 +34,10 @@ impl Row {
     fn opens(&self) -> bool {
         matches!(self.status, Status::Installed | Status::Vst2 { installed: Some(true) })
     }
-    /// Shown under 需要处理: it won't open, or there's an upgrade to an installed VST3.
+    /// Shown under 需要处理: it won't open, there's an upgrade to an installed
+    /// VST3, or a newer product to move to (升级插件).
     fn attention(&self) -> bool {
-        !self.opens() || self.fix.as_ref().is_some_and(Fix::default_on)
+        !self.opens() || self.fix.as_ref().is_some_and(|f| f.default_on() || matches!(f, Fix::Migrate { .. }))
     }
 }
 
@@ -189,7 +191,9 @@ impl App {
         let opens = rows.iter().filter(|r| r.opens()).count();
         let missing = rows.len() - opens;
         let attention = rows.iter().filter(|r| r.attention()).count();
-        let upgrades = rows.iter().filter(|r| r.opens() && r.attention()).count();
+        let migrate = |r: &Row| matches!(r.fix, Some(Fix::Migrate { .. }));
+        let upgrades = rows.iter().filter(|r| r.opens() && r.attention() && !migrate(r)).count();
+        let newer = rows.iter().filter(|r| migrate(r)).count();
         let pending = self.pending();
 
         // The project: name, folder, and where things stand.
@@ -221,6 +225,9 @@ impl App {
         }
         if upgrades > 0 {
             summary = summary.push(status(format!("{upgrades} 个可以升级到 VST3"), Tone::Blue, 1.0));
+        }
+        if newer > 0 {
+            summary = summary.push(status(format!("{newer} 个可以换成新版插件"), Tone::Blue, 1.0));
         }
         if self.scanning > 0 {
             summary = summary.push(status("正在读取…", Tone::Grey, 1.0));
@@ -583,6 +590,34 @@ impl App {
             );
         }
 
+        // 升级插件: moving to a different, newer product.
+        let up_header = row![
+            th("从").width(Length::FillPortion(3)),
+            th("升级到").width(Length::FillPortion(3)),
+            th("说明").width(Length::FillPortion(6)),
+        ]
+        .spacing(12)
+        .padding([10, 14]);
+        let mut ups = column![up_header, hairline()];
+        for (i, u) in upgrades::UPGRADES.iter().enumerate() {
+            if i > 0 {
+                ups = ups.push(hairline());
+            }
+            ups = ups.push(
+                row![
+                    t(u.from_name).size(13).color(p.text).width(Length::FillPortion(3)),
+                    status(u.to_name, if u.verified { Tone::Green } else { Tone::Blue }, 1.0).width(Length::FillPortion(3)),
+                    t(format!("{} · {}{}", u.vendor, u.note, if u.verified { "" } else { " · 未验证" }))
+                        .size(12)
+                        .color(p.text_2)
+                        .width(Length::FillPortion(6)),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .padding([10, 14]),
+            );
+        }
+
         let legend: [(Status, &str); 6] = [
             (Status::Installed, "FL 按格式和 ID 能在这台电脑上找到它"),
             (Status::Mismatch, "工程里存的 VST3 ID 这台电脑上没有，但装着同名同厂商的插件；可以改成它"),
@@ -609,6 +644,12 @@ impl App {
             column![
                 self.intro("官方支持", "这些插件有专门的规则，在 FL 里验证过：音色和设置原样迁移。其他插件的修改标为「未验证」。"),
                 container(rules).style(|_| card(1.0)),
+                Space::new().height(4),
+                t("升级插件").size(15).font(SEMIBOLD).color(p.text),
+                t("把工程里的插件换成另一个更新的产品（比如 Kontakt → Kontakt 8）。目标插件装着时，检查工程会把它列为可选修改，默认不勾。")
+                    .size(12)
+                    .color(p.text_2),
+                container(ups).style(|_| card(1.0)),
                 Space::new().height(4),
                 t("状态说明").size(15).font(SEMIBOLD).color(p.text),
                 container(explain).style(|_| card(1.0)),

@@ -18,6 +18,7 @@ use std::io::{Read, Write};
 
 use crate::check::{self, Choice, Choices, Finding, Fix, Format, Plugin, Status};
 use crate::library::{Entry, Library};
+use crate::upgrades;
 
 pub struct Set {
     pub xml: String,
@@ -121,11 +122,21 @@ fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
             let id = u32::from_be_bytes(plugin.id[..].try_into().unwrap());
             (Status::Vst2 { installed: lib.vst2_installed(id) }, None)
         }
-        Format::Vst3 if lib.is_installed(&plugin.id) => (Status::Installed, None),
-        Format::Vst3 => match target_by_name(lib, plugin) {
-            Some(k) => (Status::Mismatch, Some(Fix::Rename { target: k.name.to_string() })),
-            None => (Status::Missing, None),
-        },
+        Format::Vst3 => {
+            let (status, fix) = if lib.is_installed(&plugin.id) {
+                (Status::Installed, None)
+            } else {
+                match target_by_name(lib, plugin) {
+                    Some(k) => (Status::Mismatch, Some(Fix::Rename { target: k.name.to_string() })),
+                    None => (Status::Missing, None),
+                }
+            };
+            // A newer product that's installed here beats a rename.
+            match upgrades::from(&plugin.id).filter(|u| u.installed_in(lib)) {
+                Some(u) => (status, Some(Fix::Migrate { to: u.to_name, verified: u.verified })),
+                None => (status, fix),
+            }
+        }
     }
 }
 
@@ -151,19 +162,55 @@ pub fn analyse(lib: &Library, set: &Set) -> Vec<Finding> {
     out
 }
 
-/// The class ID a VST3 instance should get under the choices, and whether to
-/// reset its state.
-fn target(lib: &Library, plugin: &Plugin, choice: Option<Choice>) -> Option<([u8; 16], bool)> {
+/// What a VST3 instance becomes under the choices.
+struct Change {
+    class_id: [u8; 16],
+    reset: bool,
+    /// 升级插件: the new product's name and how its state converts.
+    upgrade: Option<&'static upgrades::Upgrade>,
+}
+
+fn target(lib: &Library, plugin: &Plugin, choice: Option<Choice>) -> Option<Change> {
     if plugin.format != Format::Vst3 {
         return None;
     }
     let (_, fix) = assess(lib, plugin);
     let decision = check::decide(fix.as_ref(), choice)?;
-    let id = match decision.pick {
-        Some(id) => id,
-        None => target_by_name(lib, plugin)?.class_id,
+    let (class_id, upgrade) = match (decision.pick, &fix) {
+        (Some(id), _) => (id, None),
+        (None, Some(Fix::Migrate { .. })) => {
+            let u = upgrades::from(&plugin.id)?;
+            (u.to, Some(u))
+        }
+        (None, _) => (target_by_name(lib, plugin)?.class_id, None),
     };
-    Some((id, decision.reset))
+    Some(Change { class_id, reset: decision.reset, upgrade })
+}
+
+/// `block` (a VST3 info) under another product: its info `<Name>` and its
+/// `<ProcessorState>` (hex) through the upgrade's conversion.
+fn upgraded(block: &str, up: &upgrades::Upgrade) -> Option<String> {
+    let mut out = block.to_string();
+    let (open, close) = ("<ProcessorState>", "</ProcessorState>");
+    if let (Some(a), Some(b)) = (out.find(open), out.find(close)) {
+        let hex: String = out[a + open.len()..b].chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let bytes: Option<Vec<u8>> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
+        let new = (up.state)(&bytes?)?;
+        if new.len() * 2 != hex.len() || new.iter().zip(hex.as_bytes().chunks(2)).any(|(n, h)| format!("{n:02X}").as_bytes() != h) {
+            let text: String = new.iter().map(|b| format!("{b:02X}")).collect();
+            out.replace_range(a + open.len()..b, &text);
+        }
+    }
+    // The info's own name sits after its <Preset>.
+    let after = out.find("</Preset>").map_or(0, |i| i + "</Preset>".len());
+    let tag = "<Name Value=\"";
+    if let Some(i) = out[after..].find(tag) {
+        let at = after + i + tag.len();
+        if let Some(len) = out[at..].find('"') {
+            out.replace_range(at..at + len, up.to_name);
+        }
+    }
+    Some(out)
 }
 
 /// `block` with its saved VST3 state emptied: Live then opens the plugin with
@@ -202,9 +249,16 @@ pub fn apply(lib: &Library, set: &mut Set, choices: &Choices) -> usize {
     let mut changed = 0;
     // Back to front, so earlier offsets stay valid.
     for inst in instances(&set.xml).into_iter().rev() {
-        if let Some((id, reset)) = target(lib, &inst.plugin, choices.get(&inst.plugin).copied()) {
-            let block = with_uid(&set.xml[inst.start..inst.end], id);
-            let block = if reset { without_state(&block) } else { block };
+        if let Some(change) = target(lib, &inst.plugin, choices.get(&inst.plugin).copied()) {
+            let block = with_uid(&set.xml[inst.start..inst.end], change.class_id);
+            let block = match change.upgrade {
+                Some(up) => match upgraded(&block, up) {
+                    Some(b) => b,
+                    None => continue,
+                },
+                None => block,
+            };
+            let block = if change.reset { without_state(&block) } else { block };
             set.xml.replace_range(inst.start..inst.end, &block);
             changed += 1;
         }
@@ -296,6 +350,16 @@ mod tests {
         // Reset: the state is gone, the rest of the block stays.
         assert!(s.xml.contains("<ProcessorState />") && !s.xml.contains("0A0B"));
         assert!(s.xml.contains("<Name Value=\"Vital\" />"));
+    }
+
+    #[test]
+    fn upgrade_renames_and_keeps_state() {
+        let up = upgrades::from(b"NTSV$ikDontakt\0\0").unwrap();
+        let block = r#"<Vst3PluginInfo Id="0"><Preset><Vst3Preset Id="3"><ProcessorState>0A0B</ProcessorState><Name Value="" /></Vst3Preset></Preset><Name Value="Kontakt" /></Vst3PluginInfo>"#;
+        let out = upgraded(block, up).unwrap();
+        assert!(out.contains(r#"</Preset><Name Value="Kontakt 8" />"#));
+        assert!(out.contains("<ProcessorState>0A0B</ProcessorState>"));
+        assert!(out.contains(r#"<Vst3Preset Id="3"><ProcessorState>0A0B</ProcessorState><Name Value="" />"#));
     }
 
     #[test]

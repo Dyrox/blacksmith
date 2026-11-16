@@ -49,6 +49,8 @@ pub enum Fix {
     Relink { rule: &'static str },
     /// To the installed VST3 of the same name and vendor (class ID only).
     Rename { target: String },
+    /// 升级插件: to a different, newer product (`upgrades.rs`); always opt-in.
+    Migrate { to: &'static str, verified: bool },
 }
 
 impl Fix {
@@ -60,12 +62,12 @@ impl Fix {
         match self {
             Fix::Upgrade { installed, .. } => *installed && self.verified(),
             Fix::Relink { .. } => true,
-            Fix::Rename { .. } => false,
+            Fix::Rename { .. } | Fix::Migrate { .. } => false,
         }
     }
     /// Checked in FL: official rules only.
     pub fn verified(&self) -> bool {
-        matches!(self, Fix::Upgrade { how: How::Known(_), .. } | Fix::Relink { .. })
+        matches!(self, Fix::Upgrade { how: How::Known(_), .. } | Fix::Relink { .. } | Fix::Migrate { verified: true, .. })
     }
 }
 
