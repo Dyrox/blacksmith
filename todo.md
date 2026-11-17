@@ -17,8 +17,8 @@
 
 Live 工程（.als）里的 VST2 → VST3：`supply 1.als` 加了 19 个（FabFilter 新一代 6 个、Valhalla 9 个、
 soothe2、PITCHMAP、Vital、Blackhole），待在 Live 里打开 `test-projects/supply 1 (修复).als` 验证。
-`supply 2.als` 又加了 FabFilter 老一代 14 个（走 VST3 SDK 的 VST2 交接，FabFilter 是否支持待验证），
-待打开 `test-projects/supply 2 Project/supply 2 (修复).als`，和旁边同预设的 VST3 对照。
+`supply 2.als` 加了 FabFilter 老一代：11 个已在 Live 验证（重新保存后和同预设的 VST3 一致）；
+Volcano 2、Pro-G 有几个档位差一格（默认不勾）；Simplon 的 VST3 不认交接，已去掉。
 来源和细节见 `docs/plugins.md`。上表是 FL 工程要的。
 
 ## 其他

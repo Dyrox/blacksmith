@@ -104,32 +104,36 @@ parameters whose VST2 value differs between the two sets can be solved this way:
 Volcano 2, Pro-Q 2 and Pro-G also have a different number of parameters in each format (757
 vs 709, 191 vs 190, 35 vs 34). A table therefore isn't feasible.
 
-These 14 use `State::VstWParams` instead: the VST3 SDK's VST2 hand-over (`VstW` + FXB bank
-of one `FxCk` program). This is how Cubase migrates VST2 projects, and it works only if
-FabFilter's VST3 implements it.
+These use `State::VstWParams` instead: the VST3 SDK's VST2 hand-over (`VstW` + FXB bank of
+one `FxCk` program). This is how Cubase migrates VST2 projects.
 
-The converted copy, `test-projects/supply 2 Project/supply 2 (修复).als`, has each converted
-VST3 next to a VST3 that was set to the same preset in Live.
+**Checked (Nov 2026).** The owner opened `test-projects/supply 2 Project/supply 2 (修复).als` in
+Live 12.2 and re-saved it. `blacksmith --dump` then compared each converted VST3 with the
+VST3 next to it on the same preset:
 
-| Plugin | VST2 ID | State conversion | Checked |
+| Plugin | VST2 ID | Result | Status |
 |---|---|---|---|
-| FabFilter One | `FF01` | `VstWParams` | unverified |
-| FabFilter Volcano 2 | `FV2l` | `VstWParams` | unverified |
-| FabFilter Timeless 2 | `FTms` | `VstWParams` | unverified |
-| FabFilter Simplon | `FSim` | `VstWParams` | unverified (Intel only: Live under Rosetta) |
-| FabFilter Saturn | `FSat` | `VstWParams` | unverified |
-| FabFilter Pro-R | `FPRr` | `VstWParams` | unverified |
-| FabFilter Pro-Q 2 | `FQ2p` | `VstWParams` | unverified |
-| FabFilter Pro-MB | `FPMb` | `VstWParams` | unverified |
-| FabFilter Pro-L 2 | `FL2p` | `VstWParams` | unverified |
-| FabFilter Pro-L | `FPLr` | `VstWParams` | unverified |
-| FabFilter Pro-G | `FPGr` | `VstWParams` | unverified |
-| FabFilter Pro-DS | `FPSr` | `VstWParams` | unverified |
-| FabFilter Pro-C 2 | `FC2p` | `VstWParams` | unverified |
-| FabFilter Micro | `FMic` | `VstWParams` | unverified |
+| FabFilter One | `FF01` | state identical | verified |
+| FabFilter Timeless 2 | `FTms` | state identical | verified |
+| FabFilter Saturn | `FSat` | state identical | verified |
+| FabFilter Pro-Q 2 | `FQ2p` | state identical | verified |
+| FabFilter Pro-MB | `FPMb` | state identical | verified |
+| FabFilter Pro-L 2 | `FL2p` | state identical | verified |
+| FabFilter Pro-C 2 | `FC2p` | state identical | verified |
+| FabFilter Micro | `FMic` | state identical | verified |
+| FabFilter Pro-R | `FPRr` | all 85 values equal | verified |
+| FabFilter Pro-L | `FPLr` | all 19 values equal | verified |
+| FabFilter Pro-DS | `FPSr` | all 20 values equal | verified |
+| FabFilter Volcano 2 | `FV2l` | 5 of 709 values one step higher (e.g. #555 6 vs 5) | unverified (off by default) |
+| FabFilter Pro-G | `FPGr` | value #5 is 4 instead of 3 (VST2 had 0.75) | unverified (off by default) |
+| FabFilter Simplon | `FSim` | opens on "Default Setting": its VST3 ignores the hand-over | removed |
 
-If FabFilter's VST3 ignores the hand-over, the fallback is the value table, which needs more
-sets at different settings to solve the remaining ranges.
+For Pro-R, Pro-L and Pro-DS, the only difference is the program name. The VST2 cuts it to 28
+bytes ("Ambience for Slap Bass "), and that shortened name carries over.
+
+Volcano 2 and Pro-G go wrong only on switch-type parameters, inside FabFilter's own reading of
+the hand-over. Fixing them would mean writing their `FabF` state directly, which needs the value
+table (more sets at different settings).
 
 ## Adding support
 

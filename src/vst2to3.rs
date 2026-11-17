@@ -114,11 +114,19 @@ const fn rule(name: &'static str, fourcc: &[u8; 4], fuid_hex: &str, live: (u32, 
     Rule { name, fourcc: id(fourcc), class_id: fuid(fuid_hex), live, state, verified: false }
 }
 
+/// A rule whose converted set, re-saved by the host, matched the plugin's own VST3 state.
+const fn checked(r: Rule) -> Rule {
+    Rule { verified: true, ..r }
+}
+
 const FX: (u32, u32, u32) = (1, 1, 2);
 const FX_STEREO: (u32, u32, u32) = (2, 1, 2);
 const SYNTH: (u32, u32, u32) = (0, 1, 1);
 
-/// From `supply 1.als` and `supply 2.als` (Live 12, the owner's Mac, Nov 2026).
+/// From `supply 1.als` and `supply 2.als` (Live 12, the owner's Mac, Nov 2026). `checked`: after
+/// Live re-saved the converted set, the state equals the plugin's own VST3 on the same preset.
+/// Not here: Simplon (its VST3 ignores the hand-over and opens with defaults). Volcano 2 and
+/// Pro-G stay unverified: a few switch values come out one step off.
 pub const RULES: &[Rule] = &[
     rule("Pro-Q 3", b"FQ3p", "72c4db717a4d459ab97e51745d84b39d", FX_STEREO, State::FabFilter),
     rule("Pro-Q 4", b"FQ4p", "ed57bd725c60467ea64dd2f400758b6f", FX_STEREO, State::FabFilter),
@@ -139,20 +147,19 @@ pub const RULES: &[Rule] = &[
     rule("ValhallaVintageVerb", b"vee3", "5653547665653376616c68616c6c6176", FX, State::VstW),
     rule("Vital", b"Vita", "56535456697461766974616c00000000", SYNTH, State::VstW),
     rule("Blackhole", b"HOLE", "565354484f4c45626c61636b686f6c65", FX, State::VstW),
-    rule("One", b"FF01", "9240fc4010cd45a0b7dacecaddc2e97a", SYNTH, State::VstWParams),
+    checked(rule("One", b"FF01", "9240fc4010cd45a0b7dacecaddc2e97a", SYNTH, State::VstWParams)),
     rule("Volcano 2", b"FV2l", "5d923348adf743b59f86ec29572b103e", FX_STEREO, State::VstWParams),
-    rule("Timeless 2", b"FTms", "e45b65335e7d4e28b4ca15d7940a3a6d", FX_STEREO, State::VstWParams),
-    rule("Simplon", b"FSim", "3317f47055e847e4896b59c21b843fae", FX, State::VstWParams),
-    rule("Saturn", b"FSat", "5460882ac2aa486188ccf15b4acc25c6", FX_STEREO, State::VstWParams),
-    rule("Pro-R", b"FPRr", "036eb5302a5911e2a28170076288709b", FX, State::VstWParams),
-    rule("Pro-Q 2", b"FQ2p", "55fd08e6c00b44a697da68f61c6fd576", FX_STEREO, State::VstWParams),
-    rule("Pro-MB", b"FPMb", "c3b68142c79846f282b73cabdf139076", FX_STEREO, State::VstWParams),
-    rule("Pro-L 2", b"FL2p", "afd92f729a0447b7b5e8d1d568dea985", FX_STEREO, State::VstWParams),
-    rule("Pro-L", b"FPLr", "5af2703ae65f11deb8047c9c56d89593", FX_STEREO, State::VstWParams),
+    checked(rule("Timeless 2", b"FTms", "e45b65335e7d4e28b4ca15d7940a3a6d", FX_STEREO, State::VstWParams)),
+    checked(rule("Saturn", b"FSat", "5460882ac2aa486188ccf15b4acc25c6", FX_STEREO, State::VstWParams)),
+    checked(rule("Pro-R", b"FPRr", "036eb5302a5911e2a28170076288709b", FX, State::VstWParams)),
+    checked(rule("Pro-Q 2", b"FQ2p", "55fd08e6c00b44a697da68f61c6fd576", FX_STEREO, State::VstWParams)),
+    checked(rule("Pro-MB", b"FPMb", "c3b68142c79846f282b73cabdf139076", FX_STEREO, State::VstWParams)),
+    checked(rule("Pro-L 2", b"FL2p", "afd92f729a0447b7b5e8d1d568dea985", FX_STEREO, State::VstWParams)),
+    checked(rule("Pro-L", b"FPLr", "5af2703ae65f11deb8047c9c56d89593", FX_STEREO, State::VstWParams)),
     rule("Pro-G", b"FPGr", "9d1dccf7918a436fa3cdd7115d8b193b", FX_STEREO, State::VstWParams),
-    rule("Pro-DS", b"FPSr", "59e324d08ee811e1b8578101bbe59b18", FX_STEREO, State::VstWParams),
-    rule("Pro-C 2", b"FC2p", "79f415e3c8e74807ad5da3cf7024f618", FX_STEREO, State::VstWParams),
-    rule("Micro", b"FMic", "751afc3415434cbcaa73672a109be0ff", FX, State::VstWParams),
+    checked(rule("Pro-DS", b"FPSr", "59e324d08ee811e1b8578101bbe59b18", FX_STEREO, State::VstWParams)),
+    checked(rule("Pro-C 2", b"FC2p", "79f415e3c8e74807ad5da3cf7024f618", FX_STEREO, State::VstWParams)),
+    checked(rule("Micro", b"FMic", "751afc3415434cbcaa73672a109be0ff", FX, State::VstWParams)),
 ];
 
 /// The rule for a VST2 of this unique ID, if any.
