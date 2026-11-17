@@ -69,17 +69,67 @@ its own. The VST3 numbers its parameters differently (ValhallaRoom: VST2 0, 1, 2
 - A device is refused when any of its bound slots is automated (an envelope `PointeeId` points
   at it) or MIDI-mapped (`<KeyMidi>`).
 
-**Not supported from this set.** The two formats of these plugins save different data, so one
-set at default settings can't give a mapping:
+**Not supported from this set.** The two formats of these plugins save different data:
 
 | Plugin | Why |
 |---|---|
-| FabFilter One, Volcano 2, Timeless 2, Simplon, Saturn, Pro-R, Pro-Q 2, Pro-MB, Pro-L 2, Pro-L, Pro-G, Pro-DS, Pro-C 2, Micro | The VST2 is parameter-based: Live stores the program name and normalised values. The VST3 stores `FabF` + name + plain values, so per-parameter ranges are needed. |
 | Spire | The VST3's processor state is different data. The VST2 chunk reappears as the VST3's controller state. |
 | DUNE 3 | The formats store different data (`ngiss` vs a length + `ngisrB`). |
 
-A set with these plugins at changed, non-default settings in both formats would make a
-mapping possible.
+The older FabFilter plugins were also unsupported here; `supply 2.als` below covers them.
+
+### From `test-projects/supply 2 Project/supply 2.als` (Live 12.2, Nov 2026)
+
+FabFilter's older generation, as VST2 and VST3 on the same factory preset (Pro-C 2 "De-essing
+bM", Pro-L "Film Score - Gentle and Musical bM"…).
+
+What the formats store:
+
+- **VST2** is parameter-based: Live's `<Buffer>` holds a 28-byte program name, then 0…1
+  values (f32 LE).
+- **VST3** stores `FabF` `u32 2`, name, `u32 0`, `u32 n`, n *plain* values (f32 LE), then
+  `u32 1` `u32 1`.
+
+The values map linearly per parameter, frequencies in log₂ Hz. For example, Pro-C 2 Threshold
+is 0…1 → -60…0 dB, and a frequency is 0…1 → log₂ 20…log₂ 20000.
+
+Together with `supply 1.als` (default settings) that gives two points per parameter. Only the
+parameters whose VST2 value differs between the two sets can be solved this way:
+
+| Plugin | Parameters solved |
+|---|---|
+| Pro-C 2 | 17 of 46 |
+| Saturn | 105 of 899 |
+
+Volcano 2, Pro-Q 2 and Pro-G also have a different number of parameters in each format (757
+vs 709, 191 vs 190, 35 vs 34). A table therefore isn't feasible.
+
+These 14 use `State::VstWParams` instead: the VST3 SDK's VST2 hand-over (`VstW` + FXB bank
+of one `FxCk` program). This is how Cubase migrates VST2 projects, and it works only if
+FabFilter's VST3 implements it.
+
+The converted copy, `test-projects/supply 2 Project/supply 2 (修复).als`, has each converted
+VST3 next to a VST3 that was set to the same preset in Live.
+
+| Plugin | VST2 ID | State conversion | Checked |
+|---|---|---|---|
+| FabFilter One | `FF01` | `VstWParams` | unverified |
+| FabFilter Volcano 2 | `FV2l` | `VstWParams` | unverified |
+| FabFilter Timeless 2 | `FTms` | `VstWParams` | unverified |
+| FabFilter Simplon | `FSim` | `VstWParams` | unverified (Intel only: Live under Rosetta) |
+| FabFilter Saturn | `FSat` | `VstWParams` | unverified |
+| FabFilter Pro-R | `FPRr` | `VstWParams` | unverified |
+| FabFilter Pro-Q 2 | `FQ2p` | `VstWParams` | unverified |
+| FabFilter Pro-MB | `FPMb` | `VstWParams` | unverified |
+| FabFilter Pro-L 2 | `FL2p` | `VstWParams` | unverified |
+| FabFilter Pro-L | `FPLr` | `VstWParams` | unverified |
+| FabFilter Pro-G | `FPGr` | `VstWParams` | unverified |
+| FabFilter Pro-DS | `FPSr` | `VstWParams` | unverified |
+| FabFilter Pro-C 2 | `FC2p` | `VstWParams` | unverified |
+| FabFilter Micro | `FMic` | `VstWParams` | unverified |
+
+If FabFilter's VST3 ignores the hand-over, the fallback is the value table, which needs more
+sets at different settings to solve the remaining ranges.
 
 ## Adding support
 

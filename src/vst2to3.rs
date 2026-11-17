@@ -1,14 +1,15 @@
 //! VST2 → VST3 of the same plugin in Live sets: how each plugin's VST3 stores
 //! what its VST2 saved. Every rule comes from a set holding both formats of the
 //! plugin (listed in `docs/plugins.md`), and only where the VST3's state is an
-//! exact function of the VST2's chunk; plugins whose formats save different
-//! data (parameter-based VST2s, Spire, DUNE 3…) need more than one set.
+//! exact function of the VST2's chunk — except `State::VstWParams`, the VST3
+//! SDK's hand-over, which only works if the plugin implements it. Plugins
+//! whose formats save different data (Spire, DUNE 3…) need more than one set.
 //!
 //! FL projects don't use this table yet: FL's generic path hands every chunk
 //! over in a `VstW` wrapper (`convert.rs`), and an FL rule also needs the
 //! VST3's FL template (`plugins.rs`).
 
-use crate::convert::fxb_chunk_bank;
+use crate::convert::{fxb_chunk_bank, fxb_param_bank};
 
 /// How the VST3 holds the VST2's chunk.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,6 +27,13 @@ pub enum State {
     /// preset name and notes after the block go to the VST3's controller state,
     /// which is left empty.
     FabFilter,
+    /// A parameter-based VST2 — Live's `<Buffer>` holds the program name (28
+    /// bytes) and the values (f32 LE) — handed over the VST3 SDK's way, as
+    /// Cubase migrates VST2 projects: `VstW` + FXB bank of that one program.
+    /// FabFilter's older generation: their VST3 stores plain values where the
+    /// VST2 has 0…1 ones, and two sets didn't pin down every range
+    /// (`docs/plugins.md`), so this relies on the plugin reading the hand-over.
+    VstWParams,
 }
 
 impl State {
@@ -48,6 +56,15 @@ impl State {
                 out.extend(1u32.to_le_bytes());
                 out.extend(0u32.to_le_bytes());
                 Some(out)
+            }
+            State::VstWParams => {
+                let (name, values) = (chunk.get(..28)?, chunk.get(28..)?);
+                if values.len() % 4 != 0 {
+                    return None;
+                }
+                let name = String::from_utf8_lossy(name.split(|&b| b == 0).next()?);
+                let values: Vec<f32> = values.chunks(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+                Some(fxb_param_bank(fourcc, &name, &values))
             }
         }
     }
@@ -101,7 +118,7 @@ const FX: (u32, u32, u32) = (1, 1, 2);
 const FX_STEREO: (u32, u32, u32) = (2, 1, 2);
 const SYNTH: (u32, u32, u32) = (0, 1, 1);
 
-/// From `supply 1.als` (Live 12, the owner's Mac, Nov 2026).
+/// From `supply 1.als` and `supply 2.als` (Live 12, the owner's Mac, Nov 2026).
 pub const RULES: &[Rule] = &[
     rule("Pro-Q 3", b"FQ3p", "72c4db717a4d459ab97e51745d84b39d", FX_STEREO, State::FabFilter),
     rule("Pro-Q 4", b"FQ4p", "ed57bd725c60467ea64dd2f400758b6f", FX_STEREO, State::FabFilter),
@@ -122,6 +139,20 @@ pub const RULES: &[Rule] = &[
     rule("ValhallaVintageVerb", b"vee3", "5653547665653376616c68616c6c6176", FX, State::VstW),
     rule("Vital", b"Vita", "56535456697461766974616c00000000", SYNTH, State::VstW),
     rule("Blackhole", b"HOLE", "565354484f4c45626c61636b686f6c65", FX, State::VstW),
+    rule("One", b"FF01", "9240fc4010cd45a0b7dacecaddc2e97a", SYNTH, State::VstWParams),
+    rule("Volcano 2", b"FV2l", "5d923348adf743b59f86ec29572b103e", FX_STEREO, State::VstWParams),
+    rule("Timeless 2", b"FTms", "e45b65335e7d4e28b4ca15d7940a3a6d", FX_STEREO, State::VstWParams),
+    rule("Simplon", b"FSim", "3317f47055e847e4896b59c21b843fae", FX, State::VstWParams),
+    rule("Saturn", b"FSat", "5460882ac2aa486188ccf15b4acc25c6", FX_STEREO, State::VstWParams),
+    rule("Pro-R", b"FPRr", "036eb5302a5911e2a28170076288709b", FX, State::VstWParams),
+    rule("Pro-Q 2", b"FQ2p", "55fd08e6c00b44a697da68f61c6fd576", FX_STEREO, State::VstWParams),
+    rule("Pro-MB", b"FPMb", "c3b68142c79846f282b73cabdf139076", FX_STEREO, State::VstWParams),
+    rule("Pro-L 2", b"FL2p", "afd92f729a0447b7b5e8d1d568dea985", FX_STEREO, State::VstWParams),
+    rule("Pro-L", b"FPLr", "5af2703ae65f11deb8047c9c56d89593", FX_STEREO, State::VstWParams),
+    rule("Pro-G", b"FPGr", "9d1dccf7918a436fa3cdd7115d8b193b", FX_STEREO, State::VstWParams),
+    rule("Pro-DS", b"FPSr", "59e324d08ee811e1b8578101bbe59b18", FX_STEREO, State::VstWParams),
+    rule("Pro-C 2", b"FC2p", "79f415e3c8e74807ad5da3cf7024f618", FX_STEREO, State::VstWParams),
+    rule("Micro", b"FMic", "751afc3415434cbcaa73672a109be0ff", FX, State::VstWParams),
 ];
 
 /// The rule for a VST2 of this unique ID, if any.
@@ -162,5 +193,13 @@ mod tests {
         assert_eq!(State::AsIs.convert(0, b"VC2!").unwrap(), b"VC2!");
         let w = State::VstW.convert(id(b"Ruum"), b"VC2!").unwrap();
         assert_eq!((&w[..4], &w[24..28], &w[176..]), (&b"VstW"[..], &b"FBCh"[..], &b"VC2!"[..]));
+
+        // Live's parameter buffer: 28-byte program name, then f32 LE values.
+        let mut buf = b"De-essing bM".to_vec();
+        buf.resize(28, 0);
+        buf.extend([0.25f32.to_le_bytes(), 1.0f32.to_le_bytes()].concat());
+        let w = State::VstWParams.convert(id(b"FC2p"), &buf).unwrap();
+        assert_eq!(w, fxb_param_bank(id(b"FC2p"), "De-essing bM", &[0.25, 1.0]));
+        assert_eq!(State::VstWParams.convert(0, &buf[..30]), None);
     }
 }
