@@ -245,6 +245,17 @@ pub fn fxb_chunk_bank(fourcc: u32, chunk: &[u8]) -> Vec<u8> {
     b
 }
 
+/// The chunk inside a VST3 SDK hand-over (`VstW` + `FBCh` bank), the reverse
+/// of `fxb_chunk_bank`. JUCE plugins with VST2 compatibility save their VST3
+/// state this way too.
+pub fn vstw_chunk(b: &[u8]) -> Option<&[u8]> {
+    if b.get(..4)? != b"VstW" || b.get(16..20)? != b"CcnK" || b.get(24..28)? != b"FBCh" {
+        return None;
+    }
+    let n = u32::from_be_bytes(b.get(172..176)?.try_into().ok()?) as usize;
+    b.get(176..176 + n)
+}
+
 /// A parameter-based VST2 state as Cubase hands it over: `VstW` header, then
 /// an FXB bank (`FxBk`) holding one program (`FxCk`) of float values.
 pub fn fxb_param_bank(fourcc: u32, program: &str, values: &[f32]) -> Vec<u8> {

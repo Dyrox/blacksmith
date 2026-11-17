@@ -11,6 +11,7 @@ mod fl;
 mod fldb;
 mod folders;
 mod flp;
+mod labs;
 mod library;
 mod livedb;
 mod platform;
@@ -256,6 +257,7 @@ fn status_label(status: &Status) -> (String, Tone) {
         Status::Vst2 { installed: Some(false) } => ("VST2 · 未安装".into(), Tone::Red),
         Status::Vst2 { installed: None } => ("VST2".into(), Tone::Amber),
         Status::Rosetta => ("仅 Intel · 需 Rosetta".into(), Tone::Amber),
+        Status::Deprecated { .. } => ("已停产".into(), Tone::Amber),
     }
 }
 

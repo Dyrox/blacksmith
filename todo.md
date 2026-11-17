@@ -23,6 +23,10 @@ Volcano 2、Pro-G 有几个档位差一格（默认不勾）；Simplon 的 VST3 
 
 ## 其他
 
+- LABS → Splice INSTRUMENT（停产插件）：在 Live 里打开 `supply 3 Project/supply 3 (A 原样).als` 和
+  `(B 转换).als`，看哪份的 INSTRUMENT 打开是 Soft Piano、设置对，保存后 `--dump` 对照。还要：换一个
+  音色、改几个旋钮的工程（核对旋钮对应），以及 FL 工程（INSTRUMENT 的 FL 模板）。
+
 - Serum → Serum 2（升级插件）：需要一个工程，两个插件同一个音色。
 - Ample Guitar 官方规则：需要新版插件存的 Live 工程，对照旧存档。
 - FL 里还没试过：Kontakt VST2 → Kontakt 8、Disperser / Decapitator 的设置。

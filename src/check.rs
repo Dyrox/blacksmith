@@ -42,6 +42,9 @@ pub enum Status {
     /// Installed, but its binary has no arm64: on Apple Silicon the host only
     /// loads it when opened with Rosetta (`arch.rs`).
     Rosetta,
+    /// Installed, but its maker discontinued it; `successor` replaces it
+    /// (`upgrades.rs`).
+    Deprecated { successor: &'static str },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -32,7 +32,9 @@ light and ergonomic; neutral colours following system light/dark; springy
 - `src/plugins.rs` — 官方支持 rules (Serum, OTT). Each rule: VST2 FourCC, VST3 class ID, built-in template
   (`assets/*.bin`), state transform, and a note shown in the app.
 - `src/upgrades.rs` — 升级插件: rules moving a plugin to a different, newer product (Kontakt →
-  Kontakt 8; later Serum → Serum 2…): both class IDs, the target's FL template
+  Kontakt 8, LABS → Splice INSTRUMENT; later Serum → Serum 2…). `deprecated` marks a discontinued
+  source plugin: `Status::Deprecated` (已停产) when installed, listed under 停产插件. The FL template
+  is optional (`None`: Live only).: both class IDs, the target's FL template
   (`assets/<plugin>-vst3-template.bin`), state transform, `verified`. Shown as `Fix::Migrate`
   (always opt-in) in FL (`repair::move_vst3`: new ID, name, path, param table) and Live
   (`als::upgraded`: Uid, info `<Name>`, `<ProcessorState>` through the transform). A new upgrade
@@ -43,6 +45,7 @@ light and ergonomic; neutral colours following system light/dark; springy
   `LengthPrefixed`, `FabFilter`). Shown as `Fix::Upgrade` with `How::Matched` (unverified) or
   `How::Known`. Which project each rule (here and in `plugins.rs` / `upgrades.rs`) came from:
   `docs/plugins.md` — add a row with every new rule.
+- `src/labs.rs` — LABS state → INSTRUMENT: JUCE binary XML (`VC2!`) `<Labs>` → `<SpliceINSTRUMENT>`.
 - `src/vst3.rs` — Steinberg's derived class ID and default VST3 paths.
 - `src/livedb.rs` — reads Live's plugin database (`Live Database/Live-plugins-<n>.db`, SQLite via
   rusqlite, read-only): `device:vst:<kind>:<id>?n=…` / `device:vst3:<kind>:<FUID>`.

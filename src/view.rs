@@ -35,12 +35,14 @@ struct Row {
 impl Row {
     /// FL opens it as it is: an installed VST3, or an installed VST2.
     fn opens(&self) -> bool {
-        matches!(self.status, Status::Installed | Status::Vst2 { installed: Some(true) })
+        matches!(self.status, Status::Installed | Status::Vst2 { installed: Some(true) } | Status::Deprecated { .. })
     }
-    /// Shown under 需要处理: it won't open, there's an upgrade to an installed
-    /// VST3, or a newer product to move to (升级插件).
+    /// Shown under 需要处理: it won't open, it's discontinued, there's an
+    /// upgrade to an installed VST3, or a newer product to move to (升级插件).
     fn attention(&self) -> bool {
-        !self.opens() || self.fix.as_ref().is_some_and(|f| f.default_on() || matches!(f, Fix::Migrate { .. }))
+        !self.opens()
+            || matches!(self.status, Status::Deprecated { .. })
+            || self.fix.as_ref().is_some_and(|f| f.default_on() || matches!(f, Fix::Migrate { .. }))
     }
 }
 
@@ -50,8 +52,9 @@ fn rank(status: &Status) -> u8 {
         Status::Missing => 0,
         Status::Mismatch => 1,
         Status::Rosetta => 2,
-        Status::Vst2 { .. } => 3,
-        Status::Installed => 4,
+        Status::Deprecated { .. } => 3,
+        Status::Vst2 { .. } => 4,
+        Status::Installed => 5,
     }
 }
 
@@ -194,6 +197,7 @@ impl App {
         let rows = self.plugin_rows();
         let opens = rows.iter().filter(|r| r.opens()).count();
         let rosetta = rows.iter().filter(|r| r.status == Status::Rosetta).count();
+        let deprecated = rows.iter().filter(|r| matches!(r.status, Status::Deprecated { .. })).count();
         let missing = rows.len() - opens - rosetta;
         let attention = rows.iter().filter(|r| r.attention()).count();
         let migrate = |r: &Row| matches!(r.fix, Some(Fix::Migrate { .. }));
@@ -230,6 +234,9 @@ impl App {
         }
         if rosetta > 0 {
             summary = summary.push(status(format!("{rosetta} 个只有 Intel 版"), Tone::Amber, 1.0));
+        }
+        if deprecated > 0 {
+            summary = summary.push(status(format!("{deprecated} 个已停产"), Tone::Amber, 1.0));
         }
         if upgrades > 0 {
             summary = summary.push(status(format!("{upgrades} 个可以升级到 VST3"), Tone::Blue, 1.0));
@@ -434,6 +441,9 @@ impl App {
                         todo = todo.push(pick_label("更换…"));
                     }
                 }
+                (_, None) if let Status::Deprecated { successor } = r.status => {
+                    todo = todo.push(t(format!("由 {successor} 接替：装上它就能换过去")).size(12).color(fade(p.text_2, a)));
+                }
                 (_, None) if !r.opens() && can_pick => {
                     todo = todo.push(pick_label("选择已装的插件…"));
                 }
@@ -632,41 +642,58 @@ impl App {
             );
         }
 
-        // 升级插件: moving to a different, newer product.
-        let up_header = row![
-            th("从").width(Length::FillPortion(3)),
-            th("升级到").width(Length::FillPortion(3)),
-            th("说明").width(Length::FillPortion(6)),
-        ]
-        .spacing(12)
-        .padding([10, 14]);
-        let mut ups = column![up_header, hairline()];
-        for (i, u) in upgrades::UPGRADES.iter().enumerate() {
-            if i > 0 {
-                ups = ups.push(hairline());
+        // 停产插件 / 升级插件: moving to a different, newer product.
+        let upgrade_table = |deprecated: bool| {
+            let header = row![
+                th("从").width(Length::FillPortion(3)),
+                th(if deprecated { "接替它的" } else { "升级到" }).width(Length::FillPortion(3)),
+                th("说明").width(Length::FillPortion(6)),
+            ]
+            .spacing(12)
+            .padding([10, 14]);
+            let mut table = column![header, hairline()];
+            for (i, u) in upgrades::UPGRADES.iter().filter(|u| u.deprecated == deprecated).enumerate() {
+                if i > 0 {
+                    table = table.push(hairline());
+                }
+                table = table.push(
+                    row![
+                        t(u.from_name).size(13).color(p.text).width(Length::FillPortion(3)),
+                        status(u.to_name, if u.verified { Tone::Green } else { Tone::Blue }, 1.0).width(Length::FillPortion(3)),
+                        t(format!("{} · {}{}", u.vendor, u.note, if u.verified { "" } else { " · 未验证" }))
+                            .size(12)
+                            .color(p.text_2)
+                            .width(Length::FillPortion(6)),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .padding([10, 14]),
+                );
             }
-            ups = ups.push(
-                row![
-                    t(u.from_name).size(13).color(p.text).width(Length::FillPortion(3)),
-                    status(u.to_name, if u.verified { Tone::Green } else { Tone::Blue }, 1.0).width(Length::FillPortion(3)),
-                    t(format!("{} · {}{}", u.vendor, u.note, if u.verified { "" } else { " · 未验证" }))
-                        .size(12)
-                        .color(p.text_2)
-                        .width(Length::FillPortion(6)),
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .padding([10, 14]),
-            );
-        }
+            container(table).style(|_| card(1.0))
+        };
+        // 升级插件 that aren't about a discontinued plugin (none yet; Serum 2 later).
+        let newer: Element<'_, Message> = if upgrades::UPGRADES.iter().any(|u| !u.deprecated) {
+            column![
+                t("升级插件").size(15).font(SEMIBOLD).color(p.text),
+                t("把工程里的插件换成另一个更新的产品。目标插件装着时，检查工程会把它列为可选修改，默认不勾。").size(12).color(p.text_2),
+                upgrade_table(false),
+                Space::new().height(4),
+            ]
+            .spacing(14)
+            .into()
+        } else {
+            column![].into()
+        };
 
-        let legend: [(Status, &str); 7] = [
+        let legend: [(Status, &str); 8] = [
             (Status::Installed, "FL 按格式和 ID 能在这台电脑上找到它"),
             (Status::Mismatch, "工程里存的 VST3 ID 这台电脑上没有，但装着同名同厂商的插件；可以改成它"),
             (Status::Missing, "ID 和名字都对不上，多半是没装；可以手动选一个已装的插件"),
             (Status::Vst2 { installed: Some(true) }, "VST2，这台电脑上装着；可以升级到 VST3"),
             (Status::Vst2 { installed: Some(false) }, "VST2，这台电脑上没装；装着 VST3 的话可以升级"),
             (Status::Vst2 { installed: None }, "VST2；没找到宿主的插件数据库，不知道装没装"),
+            (Status::Deprecated { successor: "" }, "装着，但厂商已经停产，有接替它的新插件；新插件装着的话可以换过去"),
             (Status::Rosetta, "装着，但只有 Intel 版：Apple 芯片的 Mac 上要用 Rosetta 打开宿主才能加载；有原生的 VST3 的话可以升级过去"),
         ];
         let mut explain = column![row![th("状态").width(200), th("含义").width(Length::Fill)].spacing(12).padding([10, 14]), hairline()];
@@ -695,12 +722,13 @@ impl App {
                     .color(p.text_2),
                 container(live).style(|_| card(1.0)),
                 Space::new().height(4),
-                t("升级插件").size(15).font(SEMIBOLD).color(p.text),
-                t("把工程里的插件换成另一个更新的产品（比如 Kontakt → Kontakt 8）。目标插件装着时，检查工程会把它列为可选修改，默认不勾。")
+                t("停产插件").size(15).font(SEMIBOLD).color(p.text),
+                t("厂商已经停产、有新插件接替的插件。检查工程会标出「已停产」；新插件装着时可以换过去，默认不勾。")
                     .size(12)
                     .color(p.text_2),
-                container(ups).style(|_| card(1.0)),
+                upgrade_table(true),
                 Space::new().height(4),
+                newer,
                 t("状态说明").size(15).font(SEMIBOLD).color(p.text),
                 container(explain).style(|_| card(1.0)),
                 container(

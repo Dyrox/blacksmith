@@ -178,7 +178,7 @@ mod tests {
         let state = write_records(1, &[(VST3_HEADER, vec![1; 64]), (VST3_COMPONENT, b"hsin...".to_vec()), (VST3_PARAM_IDS, vec![0; 8])]);
         let mut old = read_records(&vst3(b"NTSV$ikDontakt\0\0", "Kontakt", "Native Instruments", state)[4..]).unwrap();
         old.push((PATH, b"/Library/Audio/Plug-Ins/VST3/Kontakt.vst3".to_vec()));
-        let new = move_vst3(&old, &up.builtin_target(), up.state, Some(up.to_name)).unwrap();
+        let new = move_vst3(&old, &up.builtin_target().unwrap(), up.state, Some(up.to_name)).unwrap();
         assert_eq!(get(&new, CLASS_ID), Some(&up.to[..]));
         assert_eq!(get(&new, NAME), Some(&b"Kontakt 8"[..]));
         assert!(get(&new, PATH).unwrap().ends_with(b"Kontakt 8.vst3"));

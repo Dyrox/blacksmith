@@ -136,14 +136,13 @@ enum Unwrapped<'a> {
 }
 
 fn unwrap_vstw(b: &[u8]) -> Option<Unwrapped<'_>> {
+    if let Some(chunk) = crate::convert::vstw_chunk(b) {
+        return Some(Unwrapped::Chunk(chunk));
+    }
     if b.get(..4)? != b"VstW" || b.get(16..20)? != b"CcnK" {
         return None;
     }
     match b.get(24..28)? {
-        b"FBCh" => {
-            let n = u32::from_be_bytes(b.get(172..176)?.try_into().ok()?) as usize;
-            Some(Unwrapped::Chunk(b.get(176..176 + n)?))
-        }
         b"FxBk" => {
             let prg = b.get(172..)?;
             let n = i32::from_be_bytes(prg.get(24..28)?.try_into().ok()?) as usize;

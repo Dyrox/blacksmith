@@ -180,6 +180,12 @@ fn instances(xml: &str) -> Vec<Instance> {
 }
 
 fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
+    let (status, fix) = found(lib, plugin);
+    (upgrades::deprecated(status, plugin), fix)
+}
+
+/// Status by format and ID, and the suggested fix.
+fn found(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
     match plugin.format {
         Format::Vst2 => {
             let id = u32::from_be_bytes(plugin.id[..].try_into().unwrap());

@@ -8,7 +8,8 @@ disk.
 Rules are kept in three places:
 
 - `src/plugins.rs`: 官方支持 for FL.
-- `src/upgrades.rs`: 升级插件, moving to a newer product.
+- `src/upgrades.rs`: 升级插件 and 停产插件, moving to a newer product (`deprecated`: the old one is
+  discontinued and shows as 已停产).
 - `assets/vst2to3.tsv`: VST2 → VST3 of the same plugin in Live sets, one row per plugin (the
   state conversions it names are in `src/vst2to3.rs`).
 
@@ -31,8 +32,31 @@ Rules are kept in three places:
 
 | Plugin | Rule | Project | State conversion | Status |
 |---|---|---|---|---|
-| Kontakt (6) VST3 → Kontakt 8 | 升级插件 | the owner's set (file name not recorded) | as is | verified, Live 12 |
-| Kontakt 5/6 VST2 → Kontakt 8 | 升级插件 | `gcse Project/version 2.als` (46 instances), then another set | `<Buffer>` → `<ProcessorState>` as is | verified, Live 12 |
+| Kontakt (6) VST3 → Kontakt 8 | 停产插件 | the owner's set (file name not recorded) | as is | verified, Live 12 |
+| Kontakt 5/6 VST2 → Kontakt 8 | 停产插件 | `gcse Project/version 2.als` (46 instances), then another set | `<Buffer>` → `<ProcessorState>` as is | verified, Live 12 |
+
+### From `test-projects/supply 3 Project/supply 3.als` (Live 12.2, Nov 2026)
+
+Spitfire LABS is discontinued: since 31 Oct 2025 it gets no updates or support, and its content
+moved to the free Splice INSTRUMENT (VST3 only). Splice says existing projects have to be moved
+by hand, track by track. The set holds "Soft Piano" in LABS VST2, LABS VST3 and INSTRUMENT.
+
+- LABS VST2 (`SfLb`) chunk and LABS VST3 state (`VstW` hand-over) hold the same JUCE binary XML
+  (`VC2!`): `<Labs><META family="Soft Piano" name="Soft Piano" …>`, settings, `<PARAM>`s.
+- INSTRUMENT (FUID `56535449-6e73-7473-706c69636520696e`, `VstW` with ID `Inst`) saves the same
+  XML as `<SpliceINSTRUMENT>`, with the general controls numbered (`g_general_param_1…7`, paired
+  with LABS's `g_gain`, `g_pan`, `g_tune`, `i_expression`, `i_dynamics` by MIDI CC), no per-
+  instrument `<PARAM>`s, and a few fields of its own (`layerIdx`, `n_main`, `<UIState>`,
+  `<GLOBALCONVIR sampleFileId=…>`).
+
+| Rule | Conversion (`src/labs.rs`) | Status |
+|---|---|---|
+| LABS VST3 → INSTRUMENT (停产插件) | `converted`: root renamed, general controls renumbered, other `<PARAM>`s left out | unverified, Live only (no FL template) |
+| LABS VST2 → INSTRUMENT (停产插件) | same | unverified, Live only |
+
+Two test copies sit next to the set: `supply 3 (A 原样).als` (the `<Labs>` XML handed over as
+is) and `supply 3 (B 转换).als` (converted). Whichever INSTRUMENT opens with the preset and its
+settings decides the rule.
 
 ### From `test-projects/supply 1.als` (Live 12.2, Nov 2026)
 
