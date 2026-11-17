@@ -32,6 +32,8 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # Baked into the app for its update check (src/update.rs).
+      BLACKSMITH_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -54,6 +56,8 @@ jobs:
     runs-on: macos-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # Baked into the app for its update check (src/update.rs).
+      BLACKSMITH_VERSION: ${{ needs.version.outputs.version }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v5

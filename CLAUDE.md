@@ -58,6 +58,9 @@ light and ergonomic; neutral colours following system light/dark; springy
 - `src/view.rs` — all drawing: sidebar, top bar (title + page action), steps + drop zone when a
   page is empty, then tables (插件 / 工程 tabs). Look modelled on livesaver: near-monochrome, ink
   primary button, status as coloured mark + words, hairline tables; springy reveals kept.
+- `src/update.rs` — 检查更新 at launch: GitHub's latest release (via the system `curl`, no HTTP
+  crate) against the version CI bakes in (`BLACKSMITH_VERSION`); local builds don't check. Shown
+  at the bottom of the sidebar as 新版本 x · 下载, opening the release page.
 - `src/style.rs` — palette via `p()`, widget styles. `src/platform.rs` — macOS dark-mode read.
 - `src/folders.rs` — standard plugin folders per OS (Mac `/Library` + `~/Library/Audio/Plug-Ins/{VST3,VST}`,
   Windows Common Files VST3/VST2, Program Files VSTPlugins…), VST3 class IDs from `moduleinfo.json`
@@ -98,7 +101,8 @@ Kontakt 7/8, SWAM, MetaTune… 22 on the owner's Mac; no `moduleinfo.json` eithe
 by file, so a VST3 instance whose bundle file name or name matches one of those counts as installed. An installed VST2 counts as opening; it's listed under
 需要处理 only when an installed VST3 can replace it.
 
-Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<file>|none`, `BLACKSMITH_PLUGIN_DIRS=<path list>`, `BLACKSMITH_DROP=<file>`, `BLACKSMITH_PAGE=supported|library`, `BLACKSMITH_DARK=1`.
+Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<file>|none`, `BLACKSMITH_PLUGIN_DIRS=<path list>`, `BLACKSMITH_DROP=<file>`, `BLACKSMITH_PAGE=supported|library`, `BLACKSMITH_DARK=1`, `BLACKSMITH_VERSION=0.1.0` (pretend to be
+that version, to see the update notice).
 
 ## FL Studio format facts (verified on real projects)
 

@@ -157,6 +157,7 @@ impl App {
                 Space::new().height(10),
                 hairline(),
                 container(status(source, Tone::Grey, 1.0)).padding(Padding { top: 10.0, left: 8.0, ..Padding::ZERO }),
+                self.update_notice(),
             ]
             .spacing(2),
         )
@@ -164,6 +165,28 @@ impl App {
         .height(Length::Fill)
         .padding(Padding { top: 16.0, right: 10.0, bottom: 14.0, left: 10.0 })
         .style(|_| sidebar())
+        .into()
+    }
+
+    /// The newer release, if the check found one: a link to its page.
+    fn update_notice(&self) -> Element<'_, Message> {
+        let Some(release) = &self.update else { return Space::new().height(0).into() };
+        let p = p();
+        container(
+            button(
+                row![
+                    status(format!("新版本 {}", release.version), Tone::Blue, 1.0),
+                    Space::new().width(Length::Fill),
+                    t("下载 ↗").size(11).font(MEDIUM).color(p.text_2),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .on_press(Message::OpenUrl(release.url.clone()))
+            .style(|_, s| secondary(s)),
+        )
+        .padding(Padding { top: 8.0, ..Padding::ZERO })
         .into()
     }
 

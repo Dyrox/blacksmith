@@ -18,6 +18,7 @@ mod platform;
 mod plugins;
 mod repair;
 mod style;
+mod update;
 mod upgrades;
 mod view;
 mod vst2to3;
@@ -247,6 +248,16 @@ fn reveal_in_folder(path: &Path) {
     let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(Path::new("."))).spawn();
 }
 
+/// Opens a web page in the default browser.
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
 /// Words and colour for a plugin's status.
 fn status_label(status: &Status) -> (String, Tone) {
     match status {
@@ -325,6 +336,8 @@ struct App {
     query: String,
     open: HashSet<String>,
     opened: Option<(String, Instant)>,
+    /// A newer release on GitHub, once the check at launch finds one.
+    update: Option<update::Release>,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +369,9 @@ enum Message {
     LibraryHost(Host),
     ToggleVendor(String),
     ExpandAll(bool),
+    /// The update check's answer.
+    Update(Option<update::Release>),
+    OpenUrl(String),
 }
 
 /// Reveal animation timing.
@@ -405,6 +421,7 @@ impl App {
             query: String::new(),
             open: HashSet::new(),
             opened: None,
+            update: None,
         };
         // Debug aids: BLACKSMITH_DROP=<file> acts as a drop at launch;
         // BLACKSMITH_PAGE=library|supported opens that page.
@@ -418,7 +435,9 @@ impl App {
             _ => {}
         }
         let theme = if forced { Task::none() } else { system::theme().map(Message::Theme) };
-        (app, Task::batch([theme, drop.unwrap_or_else(Task::none)]))
+        // Ask GitHub for a newer release off the UI thread.
+        let update = Task::perform(async { update::check() }, Message::Update);
+        (app, Task::batch([theme, drop.unwrap_or_else(Task::none), update]))
     }
 
     /// Reads a project off the UI thread; it replaces the one shown.
@@ -531,6 +550,8 @@ impl App {
                 self.now = self.boot_at;
             }
             Message::Reveal(path) => reveal_in_folder(&path),
+            Message::Update(release) => self.update = release,
+            Message::OpenUrl(url) => open_url(&url),
             Message::Filter(filter) => {
                 self.filter = filter;
                 self.list_at = Instant::now();

@@ -169,9 +169,10 @@ fn cid_to_com(hex: &str) -> Option<[u8; 16]> {
 // ------------------------------------------------------------------ JSON5-ish
 
 /// Just enough JSON for `moduleinfo.json`, which allows trailing commas and
-/// comments (JSON5). Numbers are kept as text.
+/// comments (JSON5), and GitHub's release info (`update.rs`). Numbers are kept
+/// as text.
 #[derive(Debug, Clone, PartialEq)]
-enum Json {
+pub enum Json {
     Null,
     Bool(bool),
     Num(String),
@@ -181,19 +182,19 @@ enum Json {
 }
 
 impl Json {
-    fn parse(text: &str) -> Option<Json> {
+    pub fn parse(text: &str) -> Option<Json> {
         let mut p = Parser { s: text.as_bytes(), i: 0 };
         let v = p.value(0)?;
         p.ws();
         (p.i == p.s.len()).then_some(v)
     }
-    fn get(&self, key: &str) -> Option<&Json> {
+    pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Obj(m) => m.get(key),
             _ => None,
         }
     }
-    fn str(&self) -> Option<&str> {
+    pub fn str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),
             _ => None,
