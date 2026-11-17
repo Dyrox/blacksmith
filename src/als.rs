@@ -88,6 +88,56 @@ fn fuid_to_com(mut b: [u8; 16]) -> [u8; 16] {
     b
 }
 
+/// The bytes of a hex dump as Live writes it (line breaks and tabs between).
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let hex: Vec<u8> = text.bytes().filter(u8::is_ascii_hexdigit).collect();
+    hex.chunks_exact(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok()).collect()
+}
+
+/// The text between `<tag>` and `</tag>` in `s`, if any.
+fn inner<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let a = s.find(&open)? + open.len();
+    Some(&s[a..a + s[a..].find(&format!("</{tag}>"))?])
+}
+
+/// A plugin instance as saved, for `--dump`.
+pub struct Saved {
+    pub plugin: Plugin,
+    /// The track it's on (the closest track name before it).
+    pub track: String,
+    /// VST2: `<Buffer>`; VST3: `<ProcessorState>`.
+    pub state: Vec<u8>,
+    /// VST3 `<ControllerState>`.
+    pub controller: Vec<u8>,
+    /// VST2: how Live saved it — `FBCh` (the plugin's chunk) or `FxBk`
+    /// (program name, 28 bytes, then the values as f32 LE).
+    pub kind: String,
+}
+
+/// Every plugin instance with its saved state, in order.
+pub fn saved(set: &Set) -> Vec<Saved> {
+    let xml = &set.xml;
+    instances(xml)
+        .into_iter()
+        .map(|inst| {
+            let block = &xml[inst.start..inst.end];
+            let tag = "<EffectiveName Value=\"";
+            let track = xml[..inst.start].rfind(tag).and_then(|i| xml[i + tag.len()..].split('"').next()).map(unescape).unwrap_or_default();
+            let bytes = |t: &str| inner(block, t).and_then(unhex).unwrap_or_default();
+            let (state, controller) = match inst.plugin.format {
+                Format::Vst2 => (bytes("Buffer"), Vec::new()),
+                Format::Vst3 => (bytes("ProcessorState"), bytes("ControllerState")),
+            };
+            let kind = value_of(block, "Type")
+                .and_then(|(_, v)| v.parse::<i64>().ok())
+                .map(|t| String::from_utf8_lossy(&(t as u32).to_be_bytes()).into_owned())
+                .unwrap_or_default();
+            Saved { plugin: inst.plugin, track, state, controller, kind }
+        })
+        .collect()
+}
+
 /// Every VST2 and VST3 instance in the set, in order.
 fn instances(xml: &str) -> Vec<Instance> {
     let mut out = Vec::new();
@@ -355,8 +405,7 @@ fn vst3_info_from_vst2(block: &str, new: NewVst3, reset: bool) -> Option<String>
     let preset_id = block.find("<VstPreset Id=\"").and_then(|i| block[i + 15..].split('"').next()).unwrap_or("0");
     let (a, b) = (block.find("<Buffer>")? + "<Buffer>".len(), block.find("</Buffer>")?);
     let text = &block[a..b];
-    let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let old: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect::<Option<_>>()?;
+    let old = unhex(text)?;
     let converted = new.state(&old)?;
     let state = if reset {
         "<ProcessorState />".to_string()
@@ -443,8 +492,7 @@ fn upgraded(block: &str, up: &upgrades::Upgrade) -> Option<String> {
     let (open, close) = ("<ProcessorState>", "</ProcessorState>");
     if let (Some(a), Some(b)) = (out.find(open), out.find(close)) {
         let hex: String = out[a + open.len()..b].chars().filter(|c| c.is_ascii_hexdigit()).collect();
-        let bytes: Option<Vec<u8>> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
-        let new = (up.state)(&bytes?)?;
+        let new = (up.state)(&unhex(&hex)?)?;
         if new.len() * 2 != hex.len() || new.iter().zip(hex.as_bytes().chunks(2)).any(|(n, h)| format!("{n:02X}").as_bytes() != h) {
             let text: String = new.iter().map(|b| format!("{b:02X}")).collect();
             out.replace_range(a + open.len()..b, &text);

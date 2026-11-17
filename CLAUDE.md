@@ -77,6 +77,10 @@ light and ergonomic; neutral colours following system light/dark; springy
 Dev CLI: `blacksmith --dump a.flp` lists VST instances; `blacksmith --dump orig.flp resaved.flp`
 compares the original with FL's re-save of the converted copy (each loaded VST3 writes its own
 state on save, so this shows whether the settings carried over).
+`blacksmith --dump x.als` lists a Live set's plugins with their states and compares instances of
+the same VST3 (`FabF` value by value, `VstW` chunks inside, JUCE tails noted): put a reference VST3
+next to the VST2 in the test set, convert, re-save in Live, dump — the pairs should match.
+`--dump a.als b.als` pairs instances in order.
 
 `blacksmith --apply-all x.flp` saves every available change, unverified ones too, keeping settings
 (dev aid for producing test files). `blacksmith --library` prints both hosts' libraries (and where they came from).
