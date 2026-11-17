@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::check::Format;
 use crate::library::{self, Host};
-use crate::{upgrades, vst2to3};
+use crate::{update, upgrades, vst2to3};
 use crate::style::*;
 use crate::*;
 
@@ -119,7 +119,12 @@ impl App {
         let section = |label: &'static str| container(t(label).size(11).font(MEDIUM).color(p.text_3)).padding([8, 8]);
         let logo_row = row![
             svg(svg::Handle::from_memory(LOGO)).width(30).height(30),
-            column![t("Blacksmith").size(14).font(BOLD).color(p.text), t("工程文件医生").size(11).color(p.text_3)],
+            column![t("Blacksmith").size(14).font(BOLD).color(p.text), t(match update::current() {
+                    Some(v) => format!("工程文件医生 · {v}"),
+                    None => "工程文件医生".to_string(),
+                })
+                .size(11)
+                .color(p.text_3)],
         ]
         .spacing(10)
         .align_y(Alignment::Center);

@@ -38,6 +38,11 @@ use style::*;
 
 fn main() -> iced::Result {
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    // `blacksmith --version`: the release this build is (`dev` for a local build).
+    if files.first().is_some_and(|f| f.as_os_str() == "--version") {
+        println!("Blacksmith {}", update::current().as_deref().unwrap_or("dev"));
+        return Ok(());
+    }
     // `blacksmith --dump a.flp [b.flp]` lists plugins, or compares a project
     // with FL's re-save of its fixed copy.
     if files.first().is_some_and(|f| f.as_os_str() == "--dump") {

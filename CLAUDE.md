@@ -82,7 +82,7 @@ light and ergonomic; neutral colours following system light/dark; springy
   Owner's Mac (Nov 2026): 96 of 685 bundles Intel-only (Omnisphere, DUNE3 VST2 — its VST3 is
   universal —, PITCHMAP…). FL's `.nfo` also says `ps_file_arch_N=Intel`; not used.
 
-Dev CLI: `blacksmith --dump a.flp` lists VST instances; `blacksmith --dump orig.flp resaved.flp`
+Dev CLI: `blacksmith --version` prints the release (`dev` for a local build). `blacksmith --dump a.flp` lists VST instances; `blacksmith --dump orig.flp resaved.flp`
 compares the original with FL's re-save of the converted copy (each loaded VST3 writes its own
 state on save, so this shows whether the settings carried over).
 `blacksmith --dump x.als` lists a Live set's plugins with their states and compares instances of
