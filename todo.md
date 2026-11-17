@@ -23,8 +23,8 @@ Volcano 2、Pro-G 有几个档位差一格（默认不勾）；Simplon 的 VST3 
 
 ## 其他
 
-- LABS → Splice INSTRUMENT（停产插件）：Live 里已验证（Soft Piano，默认设置）。还要：改过旋钮的
-  LABS 工程（看改动是否带过去），以及 FL 工程（INSTRUMENT 的 FL 模板）。
+- LABS → Splice INSTRUMENT（停产插件）：Live 里已验证（Soft Piano，默认设置）。改过旋钮的情况没法再测
+  （LABS 已经用不了）。FL 支持只需要一个加载了 INSTRUMENT 的 FL 工程（取模板），不需要 LABS。
 - Serum → Serum 2（升级插件）：需要一个工程，两个插件同一个音色。
 - Ample Guitar 官方规则：需要新版插件存的 Live 工程，对照旧存档。
 - FL 里还没试过：Kontakt VST2 → Kontakt 8、Disperser / Decapitator 的设置。

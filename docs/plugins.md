@@ -64,7 +64,9 @@ So the rule hands the preset over as is (`labs::to_instrument`).
 | LABS VST3 → INSTRUMENT (停产插件) | `<Labs>` XML as is, `VstW` with ID `Inst` | verified, Live 12 (default settings of one preset); Live only, no FL template |
 | LABS VST2 → INSTRUMENT (停产插件) | same | verified, Live 12 |
 
-Not checked yet: a LABS instance with knobs changed from the preset.
+Not checked, and no longer possible (LABS no longer runs on the owner's Mac): a LABS instance
+with knobs changed from the preset. INSTRUMENT reads the whole `<Labs>` preset, so changed
+settings are expected to carry over, but that is unconfirmed.
 
 ### From `test-projects/supply 1.als` (Live 12.2, Nov 2026)
 
