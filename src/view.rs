@@ -49,8 +49,9 @@ fn rank(status: &Status) -> u8 {
     match status {
         Status::Missing => 0,
         Status::Mismatch => 1,
-        Status::Vst2 { .. } => 2,
-        Status::Installed => 3,
+        Status::Rosetta => 2,
+        Status::Vst2 { .. } => 3,
+        Status::Installed => 4,
     }
 }
 
@@ -192,7 +193,8 @@ impl App {
 
         let rows = self.plugin_rows();
         let opens = rows.iter().filter(|r| r.opens()).count();
-        let missing = rows.len() - opens;
+        let rosetta = rows.iter().filter(|r| r.status == Status::Rosetta).count();
+        let missing = rows.len() - opens - rosetta;
         let attention = rows.iter().filter(|r| r.attention()).count();
         let migrate = |r: &Row| matches!(r.fix, Some(Fix::Migrate { .. }));
         let upgrades = rows.iter().filter(|r| r.opens() && r.attention() && !migrate(r)).count();
@@ -225,6 +227,9 @@ impl App {
         summary = summary.push(status(format!("{opens} 个能直接打开"), Tone::Green, 1.0));
         if missing > 0 {
             summary = summary.push(status(format!("{missing} 个打不开"), Tone::Red, 1.0));
+        }
+        if rosetta > 0 {
+            summary = summary.push(status(format!("{rosetta} 个只有 Intel 版"), Tone::Amber, 1.0));
         }
         if upgrades > 0 {
             summary = summary.push(status(format!("{upgrades} 个可以升级到 VST3"), Tone::Blue, 1.0));
@@ -621,13 +626,14 @@ impl App {
             );
         }
 
-        let legend: [(Status, &str); 6] = [
+        let legend: [(Status, &str); 7] = [
             (Status::Installed, "FL 按格式和 ID 能在这台电脑上找到它"),
             (Status::Mismatch, "工程里存的 VST3 ID 这台电脑上没有，但装着同名同厂商的插件；可以改成它"),
             (Status::Missing, "ID 和名字都对不上，多半是没装；可以手动选一个已装的插件"),
             (Status::Vst2 { installed: Some(true) }, "VST2，这台电脑上装着；可以升级到 VST3"),
             (Status::Vst2 { installed: Some(false) }, "VST2，这台电脑上没装；装着 VST3 的话可以升级"),
             (Status::Vst2 { installed: None }, "VST2；没找到宿主的插件数据库，不知道装没装"),
+            (Status::Rosetta, "装着，但只有 Intel 版：Apple 芯片的 Mac 上要用 Rosetta 打开宿主才能加载；有原生的 VST3 的话可以升级过去"),
         ];
         let mut explain = column![row![th("状态").width(200), th("含义").width(Length::Fill)].spacing(12).padding([10, 14]), hairline()];
         for (i, (s, text)) in legend.into_iter().enumerate() {
@@ -762,7 +768,9 @@ impl App {
                 let tt = since - ROW_STAGGER * i as f32;
                 let (a, slide) = (ease_out_cubic(tt / FADE), ease_out_back(tt / SLIDE));
                 let format = if k.fourcc.is_some() { "VST2 → VST3" } else { "VST3" };
-                let state: Element<'_, Message> = if k.fourcc.and_then(plugins::find).is_some() {
+                let state: Element<'_, Message> = if lib.intel_only(k) {
+                    status("仅 Intel", Tone::Amber, a).into()
+                } else if k.fourcc.and_then(plugins::find).is_some() {
                     status("官方支持", Tone::Green, a).into()
                 } else {
                     Space::new().into()
@@ -804,6 +812,9 @@ impl App {
         }
         if scan.stale > 0 {
             facts = facts.push(status(format!("{short} 数据库里 {} 个已删除的插件已忽略", scan.stale), Tone::Grey, 1.0));
+        }
+        if lib.intel_count() > 0 {
+            facts = facts.push(status(format!("{} 个插件文件只有 Intel 版，需 Rosetta", lib.intel_count()), Tone::Amber, 1.0));
         }
         let seg = |h: Host| {
             let active = self.library_host == h;

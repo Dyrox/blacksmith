@@ -63,6 +63,11 @@ light and ergonomic; neutral colours following system light/dark; springy
 - `src/repair.rs` — one VST3 instance (`repair_instance`, `retarget`): an official rule's relink
   (aliases, e.g. old OTT) or the library ID of the same name + vendor.
 - `src/dump.rs` — `--dump` developer view / conversion check.
+- `src/arch.rs` — Apple Silicon only: whether an installed plugin's binary lacks arm64 (Mach-O
+  header read from the file, never loaded) → `Status::Rosetta` (仅 Intel · 需 Rosetta). The library
+  keeps the Intel-only file paths (`Library::intel_only`, `vst2_intel_only`, `vst3_intel_only`).
+  Owner's Mac (Nov 2026): 96 of 685 bundles Intel-only (Omnisphere, DUNE3 VST2 — its VST3 is
+  universal —, PITCHMAP…). FL's `.nfo` also says `ps_file_arch_N=Intel`; not used.
 
 Dev CLI: `blacksmith --dump a.flp` lists VST instances; `blacksmith --dump orig.flp resaved.flp`
 compares the original with FL's re-save of the converted copy (each loaded VST3 writes its own

@@ -4,7 +4,7 @@
 //! (VST3 IDs).
 
 use crate::check::{self, Choice, Choices, Finding, Fix, Format, Plugin, Status};
-use crate::convert::{self, CLASS_ID, How, NAME, PLUGIN_DATA, STATE, VENDOR, get, plugin_records, text, wrapper_version};
+use crate::convert::{self, CLASS_ID, How, NAME, PATH, PLUGIN_DATA, STATE, VENDOR, get, plugin_records, text, wrapper_version};
 use crate::flp::{Project, Records, write_records};
 use crate::library::{Entry, Library};
 use crate::{plugins, repair, upgrades};
@@ -39,10 +39,17 @@ fn assess(lib: &Library, old: &[(u32, Vec<u8>)], plugin: &Plugin, in_project: &[
                     how: up.how,
                 }),
             };
-            (Status::Vst2 { installed: lib.vst2_installed(fourcc) }, fix)
+            let status = match lib.vst2_installed(fourcc) {
+                Some(true) if lib.vst2_intel_only(fourcc) => Status::Rosetta,
+                installed => Status::Vst2 { installed },
+            };
+            (status, fix)
         }
         Format::Vst3 => {
             let (status, fix) = match repair::repair_instance(lib, old, in_project).1 {
+                How::Recognized if lib.vst3_intel_only(&plugin.id, &text(old, PATH), &plugin.name, &plugin.vendor) => {
+                    (Status::Rosetta, None)
+                }
                 How::Recognized => (Status::Installed, None),
                 How::Relinked(rule) => (Status::Mismatch, Some(Fix::Relink { rule })),
                 How::Reidentified => {

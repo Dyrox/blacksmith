@@ -128,11 +128,16 @@ fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
         Format::Vst2 => {
             let id = u32::from_be_bytes(plugin.id[..].try_into().unwrap());
             let fix = upgrades::from_vst2(id).filter(|u| u.installed_in(lib)).map(|u| Fix::Migrate { to: u.to_name, verified: u.verified });
-            (Status::Vst2 { installed: lib.vst2_installed(id) }, fix)
+            let status = match lib.vst2_installed(id) {
+                Some(true) if lib.vst2_intel_only(id) => Status::Rosetta,
+                installed => Status::Vst2 { installed },
+            };
+            (status, fix)
         }
         Format::Vst3 => {
             let (status, fix) = if lib.is_installed(&plugin.id) {
-                (Status::Installed, None)
+                let rosetta = lib.vst3_intel_only(&plugin.id, "", &plugin.name, "");
+                (if rosetta { Status::Rosetta } else { Status::Installed }, None)
             } else {
                 match target_by_name(lib, plugin) {
                     Some(k) => (Status::Mismatch, Some(Fix::Rename { target: k.name.to_string() })),

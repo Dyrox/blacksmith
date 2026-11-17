@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use crate::{fldb, folders, livedb};
+use crate::{arch, fldb, folders, livedb};
 
 const TABLE: &str = include_str!("../assets/known_ids.tsv");
 
@@ -98,11 +98,13 @@ static BUILTIN: LazyLock<Vec<Entry>> = LazyLock::new(|| TABLE.lines().filter_map
 pub struct Library {
     plugins: Vec<Entry>,
     source: Source,
-    /// Installed VST2 IDs; `None` when only the built-in table is known.
-    vst2: Option<HashSet<u32>>,
+    /// Installed VST2s: ID → its files; `None` when only the built-in table is known.
+    vst2: Option<HashMap<u32, Vec<String>>>,
     compat: HashMap<[u8; 16], [u8; 16]>,
-    /// Plugin keys of VST3s installed without a known class ID (found by file).
-    unscanned: HashSet<String>,
+    /// VST3s installed without a known class ID (found by file): plugin key → file.
+    unscanned: HashMap<String, String>,
+    /// Plugin files without arm64 (`arch.rs`; Apple Silicon Macs only).
+    intel: HashSet<String>,
     scan: Scan,
 }
 
@@ -123,9 +125,12 @@ fn build(db: Option<HostDb>, folder_list: Vec<PathBuf>, found: &[folders::Found]
             let listed_plugins = db.plugins.len();
             let plugins: Vec<Entry> = db.plugins.into_iter().filter(|k| k.path.is_none_or(exists)).collect();
             let gone_vst2 = db.vst2.iter().filter(|(_, p)| !exists(p)).count();
-            let vst2: HashSet<u32> = db.vst2.iter().filter(|(_, p)| exists(p)).map(|(id, _)| *id).collect();
+            let mut vst2: HashMap<u32, Vec<String>> = HashMap::new();
+            for (id, path) in db.vst2.into_iter().filter(|(_, p)| exists(p)) {
+                vst2.entry(id).or_default().push(path);
+            }
             scan.stale = listed_plugins - plugins.len() + gone_vst2;
-            let unscanned = db.unscanned.into_iter().filter(|(_, p)| exists(p)).map(|(k, _)| k).collect();
+            let unscanned = db.unscanned.into_iter().filter(|(_, p)| exists(p)).collect();
             // On disk but not in the host's list: it hasn't scanned them yet.
             let norm = |p: &str| p.trim_end_matches(['/', '\\']).to_lowercase();
             let listed: HashSet<String> = db.files.iter().map(|p| norm(p)).collect();
@@ -135,7 +140,8 @@ fn build(db: Option<HostDb>, folder_list: Vec<PathBuf>, found: &[folders::Found]
                 .map(|f| file_name(&f.path))
                 .collect();
             let mut lib =
-                Library { plugins, source: Source::Host(db.path), vst2: Some(vst2), compat: db.compat, unscanned, scan: Scan::default() };
+                Library { vst2: Some(vst2), compat: db.compat, unscanned, ..Library::empty(Source::Host(db.path)) };
+            lib.plugins = plugins;
             // IDs the host didn't record, from moduleinfo.json.
             for f in found {
                 if let Some(info) = &f.info {
@@ -151,7 +157,8 @@ fn build(db: Option<HostDb>, folder_list: Vec<PathBuf>, found: &[folders::Found]
                 match &f.info {
                     Some(info) => scan.ids_from_files += add_module(&mut lib, f, info, true),
                     None if f.kind == folders::Kind::Vst3 => {
-                        lib.unscanned.insert(fldb::bundle_key(&f.path.to_string_lossy()));
+                        let path = f.path.to_string_lossy().into_owned();
+                        lib.unscanned.insert(fldb::bundle_key(&path), path);
                     }
                     None => {}
                 }
@@ -166,6 +173,11 @@ fn build(db: Option<HostDb>, folder_list: Vec<PathBuf>, found: &[folders::Found]
         }
     };
     lib.plugins.sort_by_key(|k| (k.vendor.to_lowercase(), k.name.to_lowercase()));
+    if arch::applies() {
+        let files = lib.plugins.iter().filter_map(|k| k.path.map(str::to_string));
+        let files = files.chain(lib.unscanned.values().cloned()).chain(lib.vst2.iter().flat_map(|m| m.values().flatten().cloned()));
+        lib.intel = files.filter(|f| arch::intel_only(std::path::Path::new(f))).collect();
+    }
     lib.scan = scan;
     lib
 }
@@ -176,7 +188,7 @@ fn add_module(lib: &mut Library, f: &folders::Found, info: &folders::ModuleInfo,
     let bundle = file_name(&f.path);
     // With a host database, a bundle only adds IDs when the host lists its file
     // (its scan just didn't record them): the host must know the plugin.
-    let listed = always || lib.unscanned.contains(&fldb::bundle_key(&f.path.to_string_lossy()));
+    let listed = always || lib.unscanned.contains_key(&fldb::bundle_key(&f.path.to_string_lossy()));
     for (cid, name, instrument) in &info.classes {
         if !listed || lib.plugins.iter().any(|p| p.class_id == *cid) {
             continue;
@@ -202,7 +214,15 @@ fn add_module(lib: &mut Library, f: &folders::Found, info: &folders::ModuleInfo,
 
 impl Library {
     fn empty(source: Source) -> Self {
-        Library { plugins: Vec::new(), source, vst2: None, compat: HashMap::new(), unscanned: HashSet::new(), scan: Scan::default() }
+        Library {
+            plugins: Vec::new(),
+            source,
+            vst2: None,
+            compat: HashMap::new(),
+            unscanned: HashMap::new(),
+            intel: HashSet::new(),
+            scan: Scan::default(),
+        }
     }
 
     pub fn source(&self) -> &Source {
@@ -231,14 +251,45 @@ impl Library {
     /// Whether the host lists a VST3 by this bundle path or name without having
     /// recorded its class ID (it then finds it by file).
     pub fn is_unscanned_installed(&self, path: &str, name: &str, vendor: &str) -> bool {
+        self.unscanned_file(path, name, vendor).is_some()
+    }
+
+    fn unscanned_file(&self, path: &str, name: &str, vendor: &str) -> Option<&String> {
         [fldb::bundle_key(path), plugin_key(name, vendor), plugin_key(name, "")]
             .iter()
-            .any(|k| !k.is_empty() && self.unscanned.contains(k))
+            .filter(|k| !k.is_empty())
+            .find_map(|k| self.unscanned.get(k))
     }
 
     /// Whether the host has this VST2; `None` without its database.
     pub fn vst2_installed(&self, fourcc: u32) -> Option<bool> {
-        self.vst2.as_ref().map(|s| s.contains(&fourcc))
+        self.vst2.as_ref().map(|s| s.contains_key(&fourcc))
+    }
+
+    /// Whether this installed plugin only runs on Intel (needs Rosetta on
+    /// Apple Silicon). Always `false` elsewhere.
+    pub fn intel_only(&self, k: &Entry) -> bool {
+        k.path.is_some_and(|p| self.intel.contains(p))
+    }
+
+    /// Whether the VST3 the host loads for this instance only runs on Intel.
+    pub fn vst3_intel_only(&self, class_id: &[u8], path: &str, name: &str, vendor: &str) -> bool {
+        let own = <[u8; 16]>::try_from(class_id).ok().and_then(|id| self.compat.get(&id)).map_or(class_id, |id| &id[..]);
+        match self.by_class_id(own) {
+            Some(k) => self.intel_only(k),
+            None => self.unscanned_file(path, name, vendor).is_some_and(|f| self.intel.contains(f)),
+        }
+    }
+
+    /// Whether every file of this installed VST2 only runs on Intel.
+    pub fn vst2_intel_only(&self, fourcc: u32) -> bool {
+        let files = self.vst2.as_ref().and_then(|m| m.get(&fourcc));
+        files.is_some_and(|f| !f.is_empty() && f.iter().all(|f| self.intel.contains(f)))
+    }
+
+    /// How many installed plugin files only run on Intel.
+    pub fn intel_count(&self) -> usize {
+        self.intel.len()
     }
 
     /// The VST3 that replaces a VST2: this computer's, else the built-in table's.
@@ -400,7 +451,7 @@ mod tests {
         // Serum stays, Gone is dropped, Kontakt gains its ID from moduleinfo,
         // New isn't in FL's list so it's reported, not added.
         assert_eq!(ids, [3, 1]); // sorted by vendor: NI, V
-        assert_eq!(lib.vst2, Some([7].into_iter().collect()));
+        assert_eq!(lib.vst2.as_ref().map(|m| m.keys().copied().collect::<Vec<_>>()), Some(vec![7]));
         assert_eq!(lib.scan.stale, 2);
         assert_eq!(lib.scan.unregistered, ["New.vst3"]);
         assert_eq!(lib.scan.ids_from_files, 1);

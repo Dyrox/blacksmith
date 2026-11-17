@@ -39,6 +39,9 @@ pub enum Status {
     Missing,
     /// A VST2; whether it's installed here (`None`: unknown, no local database).
     Vst2 { installed: Option<bool> },
+    /// Installed, but its binary has no arm64: on Apple Silicon the host only
+    /// loads it when opened with Rosetta (`arch.rs`).
+    Rosetta,
 }
 
 #[derive(Debug, Clone, PartialEq)]

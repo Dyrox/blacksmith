@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod als;
+mod arch;
 mod check;
 mod convert;
 mod document;
@@ -53,17 +54,19 @@ fn main() -> iced::Result {
             }
             let scan = lib.scan();
             eprintln!(
-                "  插件文件夹 {} 个插件；moduleinfo.json 补上 {} 个 ID；忽略 {} 个已删除的；未扫描：{}",
+                "  插件文件夹 {} 个插件；moduleinfo.json 补上 {} 个 ID；忽略 {} 个已删除的；{} 个文件只有 Intel 版；未扫描：{}",
                 scan.on_disk,
                 scan.ids_from_files,
                 scan.stale,
+                lib.intel_count(),
                 scan.unregistered.join(", ")
             );
             for k in lib.all() {
                 let fourcc = k.fourcc.map_or("-".to_string(), |f| format!("{f:08x}"));
                 let id: String = k.class_id.iter().map(|b| format!("{b:02x}")).collect();
                 let kind = if k.instrument { "instrument" } else { "effect" };
-                println!("{}\t{fourcc}\t{id}\t{kind}\t{}\t{}\t{}", host.name(), k.vst3_file, k.vendor, k.name);
+                let arch = if lib.intel_only(k) { "intel" } else { "" };
+                println!("{}\t{fourcc}\t{id}\t{kind}\t{}\t{}\t{}\t{arch}", host.name(), k.vst3_file, k.vendor, k.name);
             }
         }
         return Ok(());
@@ -251,6 +254,7 @@ fn status_label(status: &Status) -> (String, Tone) {
         Status::Vst2 { installed: Some(true) } => ("VST2 · 已安装".into(), Tone::Green),
         Status::Vst2 { installed: Some(false) } => ("VST2 · 未安装".into(), Tone::Red),
         Status::Vst2 { installed: None } => ("VST2".into(), Tone::Amber),
+        Status::Rosetta => ("仅 Intel · 需 Rosetta".into(), Tone::Amber),
     }
 }
 
