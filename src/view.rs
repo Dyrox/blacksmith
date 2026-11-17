@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::check::Format;
 use crate::library::{self, Host};
-use crate::upgrades;
+use crate::{upgrades, vst2to3};
 use crate::style::*;
 use crate::*;
 
@@ -140,7 +140,7 @@ impl App {
                 Space::new().height(6),
                 section("插件"),
                 nav_item("已安装插件", "▤", Page::Library, 0),
-                nav_item("官方支持", "✓", Page::Supported, plugins::RULES.len()),
+                nav_item("官方支持", "✓", Page::Supported, plugins::RULES.len() + vst2to3::rules().len() + upgrades::UPGRADES.len()),
                 Space::new().height(Length::Fill),
                 container(
                     column![
@@ -598,6 +598,40 @@ impl App {
             );
         }
 
+        // Live sets: VST2 → VST3 of the same plugin (assets/vst2to3.tsv), by vendor.
+        let mut live_rules: Vec<&vst2to3::Rule> = vst2to3::rules().iter().collect();
+        live_rules.sort_by_key(|r| (r.vendor.to_lowercase(), r.name.to_lowercase()));
+        let mut live = column![
+            row![
+                th("插件").width(Length::FillPortion(3)),
+                th("厂商").width(Length::FillPortion(3)),
+                th("说明").width(Length::FillPortion(6)),
+            ]
+            .spacing(12)
+            .padding([10, 14]),
+            hairline()
+        ];
+        for (i, r) in live_rules.into_iter().enumerate() {
+            if i > 0 {
+                live = live.push(hairline());
+            }
+            let about = match (r.verified, r.note) {
+                (true, _) => "设置原样迁移，已在 Ableton Live 12 验证".to_string(),
+                (false, "") => "未验证 · 默认不勾".to_string(),
+                (false, note) => format!("未验证 · {note} · 默认不勾"),
+            };
+            live = live.push(
+                row![
+                    status(r.name, if r.verified { Tone::Green } else { Tone::Blue }, 1.0).width(Length::FillPortion(3)),
+                    t(r.vendor).size(13).color(p.text_2).width(Length::FillPortion(3)),
+                    t(about).size(12).color(p.text_2).width(Length::FillPortion(6)),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .padding([8, 14]),
+            );
+        }
+
         // 升级插件: moving to a different, newer product.
         let up_header = row![
             th("从").width(Length::FillPortion(3)),
@@ -651,8 +685,15 @@ impl App {
 
         scroll(
             column![
-                self.intro("官方支持", "这些插件有专门的规则，在 FL 里验证过：音色和设置原样迁移。其他插件的修改标为「未验证」。"),
+                self.intro("官方支持", "这些插件有专门的规则，在宿主里验证过：音色和设置原样迁移。其他插件的修改标为「未验证」。"),
+                t("FL Studio · VST2 → VST3").size(15).font(SEMIBOLD).color(p.text),
                 container(rules).style(|_| card(1.0)),
+                Space::new().height(4),
+                t("Ableton Live · VST2 → VST3").size(15).font(SEMIBOLD).color(p.text),
+                t("Live 工程里的 VST2 换成同一个插件的 VST3。转换后的工程经 Live 重新保存，和插件自己的 VST3 存的设置一致。")
+                    .size(12)
+                    .color(p.text_2),
+                container(live).style(|_| card(1.0)),
                 Space::new().height(4),
                 t("升级插件").size(15).font(SEMIBOLD).color(p.text),
                 t("把工程里的插件换成另一个更新的产品（比如 Kontakt → Kontakt 8）。目标插件装着时，检查工程会把它列为可选修改，默认不勾。")

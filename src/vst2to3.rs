@@ -102,6 +102,9 @@ pub fn live_params(buffer: &[u8]) -> Option<(String, Vec<f32>)> {
 pub struct Rule {
     /// The VST3's name as Live shows it.
     pub name: &'static str,
+    pub vendor: &'static str,
+    /// Shown in the app, e.g. what isn't carried over exactly.
+    pub note: &'static str,
     /// VST2 unique ID (big-endian integer).
     pub fourcc: u32,
     /// VST3 class ID as FL stores it (COM byte order).
@@ -113,7 +116,8 @@ pub struct Rule {
     pub verified: bool,
 }
 
-/// One row: `vst2  vst3  io  state  status  name  from`, tab-separated.
+/// One row: `vst2  vst3  io  state  status  name  vendor  from  [note]`,
+/// tab-separated.
 /// Comments and malformed rows yield `None`.
 fn parse(line: &'static str) -> Option<Rule> {
     let mut f = line.split('\t');
@@ -133,7 +137,10 @@ fn parse(line: &'static str) -> Option<Rule> {
         _ => return None,
     };
     let name = f.next()?;
-    Some(Rule { name, fourcc, class_id, live, state, verified })
+    let vendor = f.next()?;
+    let _from = f.next()?;
+    let note = f.next().unwrap_or("");
+    Some(Rule { name, vendor, note, fourcc, class_id, live, state, verified })
 }
 
 fn rows() -> impl Iterator<Item = &'static str> {
