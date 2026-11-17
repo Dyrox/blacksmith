@@ -56,6 +56,9 @@ const VST3_FLAG: u32 = 8;
 pub enum How {
     /// A plugin with a dedicated, tested rule.
     Known(&'static str),
+    /// A plugin with a rule from comparing both formats in a host
+    /// (`vst2to3.rs`), not yet opened there after converting.
+    Matched(&'static str),
     /// Generic conversion: follows the VST3 spec, but not verified for this
     /// plugin. `derived`: the VST3 class ID came from Steinberg's naming rule
     /// rather than from FL or a VST3 instance in the project, so it may not

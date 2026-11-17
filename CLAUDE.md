@@ -37,6 +37,11 @@ light and ergonomic; neutral colours following system light/dark; springy
   (always opt-in) in FL (`repair::move_vst3`: new ID, name, path, param table) and Live
   (`als::upgraded`: Uid, info `<Name>`, `<ProcessorState>` through the transform). A new upgrade
   needs a project with both plugins holding the same sound.
+- `src/vst2to3.rs` — VST2 → VST3 of the same plugin in Live sets: per VST2 ID the VST3 class ID,
+  Live's (inputs, outputs, DeviceType) and how the VST3 holds the chunk (`State::AsIs`, `VstW`,
+  `LengthPrefixed`, `FabFilter`). Shown as `Fix::Upgrade` with `How::Matched` (unverified) or
+  `How::Known`. Which project each rule (here and in `plugins.rs` / `upgrades.rs`) came from:
+  `docs/plugins.md` — add a row with every new rule.
 - `src/vst3.rs` — Steinberg's derived class ID and default VST3 paths.
 - `src/livedb.rs` — reads Live's plugin database (`Live Database/Live-plugins-<n>.db`, SQLite via
   rusqlite, read-only): `device:vst:<kind>:<id>?n=…` / `device:vst3:<kind>:<FUID>`.
@@ -151,7 +156,11 @@ Debug env vars: `BLACKSMITH_FLDB=<Installed folder>|none`, `BLACKSMITH_LIVEDB=<f
   in AGSC 3.7.0 `AAGParameterList::loadState` (null element). Hence unverified fixes default off and
   the reset option. With 重置设置 (`<ProcessorState />`) the same set opens in Live 12.2.1 (checked
   by the owner, Nov 2026). A proper Ample rule needs a set saved by the new build to compare.
-- Phase 2 (not done): VST2 → VST3 in sets needs `<Buffer>` → `<ProcessorState>` per plugin.
+- VST2 → VST3 in sets: `<VstPluginInfo>` rebuilt as `<Vst3PluginInfo>` (`als::vst3_info_from_vst2`)
+  with `<Buffer>` → `<ProcessorState>` through a `vst2to3.rs` rule (or an upgrade). Live binds a
+  small plugin's first parameters itself (`<ParameterId>` = VST2 index); the VST3 numbers them
+  differently, so unused bound slots are unbound (`als::unbind`) and a device with an automated
+  (`<PointeeId>` of its Automation/ModulationTarget) or MIDI-mapped (`<KeyMidi>`) slot is refused.
 
 ## Kontakt (6) → Kontakt 8 (test project `test-projects/kontakt vs kontakt 8/`)
 

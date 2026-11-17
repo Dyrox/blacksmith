@@ -14,11 +14,13 @@
 //! byte of the XML stays as Live wrote it (the gzip wrapper is rewritten).
 //! Phase 1: VST3 IDs only; VST2 → VST3 needs per-plugin state conversion.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 
 use crate::check::{self, Choice, Choices, Finding, Fix, Format, Plugin, Status};
 use crate::library::{Entry, Library};
-use crate::upgrades;
+use crate::convert::How;
+use crate::{upgrades, vst2to3};
 
 pub struct Set {
     pub xml: String,
@@ -49,6 +51,10 @@ impl Set {
         gz.write_all(self.xml.as_bytes()).expect("writing to memory");
         gz.finish().expect("writing to memory")
     }
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 fn unescape(s: &str) -> String {
@@ -127,7 +133,15 @@ fn assess(lib: &Library, plugin: &Plugin) -> (Status, Option<Fix>) {
     match plugin.format {
         Format::Vst2 => {
             let id = u32::from_be_bytes(plugin.id[..].try_into().unwrap());
-            let fix = upgrades::from_vst2(id).filter(|u| u.installed_in(lib)).map(|u| Fix::Migrate { to: u.to_name, verified: u.verified });
+            // A newer product beats the plugin's own VST3.
+            let fix = match upgrades::from_vst2(id).filter(|u| u.installed_in(lib)) {
+                Some(u) => Some(Fix::Migrate { to: u.to_name, verified: u.verified }),
+                None => vst2to3::find(id).filter(|r| lib.is_installed(&r.class_id)).map(|r| Fix::Upgrade {
+                    how: if r.verified { How::Known(r.name) } else { How::Matched(r.name) },
+                    target: r.name.to_string(),
+                    installed: true,
+                }),
+            };
             let status = match lib.vst2_installed(id) {
                 Some(true) if lib.vst2_intel_only(id) => Status::Rosetta,
                 installed => Status::Vst2 { installed },
@@ -174,24 +188,87 @@ pub fn analyse(lib: &Library, set: &Set) -> Vec<Finding> {
         out.push(Finding { plugin: inst.plugin.clone(), status, fix, instances: 1 });
     }
     // A VST2 is only moved when every instance can be.
+    let used = pointees(&set.xml);
     for f in out.iter_mut().filter(|f| f.plugin.format == Format::Vst2) {
-        if all.iter().any(|i| i.plugin == f.plugin && !vst2_movable(&set.xml, i)) {
+        if all.iter().any(|i| i.plugin == f.plugin && !vst2_movable(&set.xml, i, &used)) {
             f.fix = None;
         }
     }
     out
 }
 
+/// The IDs automation and clip envelopes point at (`<PointeeId>`): a
+/// parameter's `AutomationTarget` / `ModulationTarget` IDs are in here when
+/// something in the set moves it.
+fn pointees(xml: &str) -> HashSet<&str> {
+    let tag = "<PointeeId Value=\"";
+    xml.match_indices(tag).filter_map(|(i, _)| xml[i + tag.len()..].split('"').next()).collect()
+}
+
+/// The parameter slots in a device's `<ParameterList>`, as ranges of `device`.
+fn slots(device: &str) -> Vec<(usize, usize)> {
+    let Some(list) = device.find("<ParameterList>") else { return Vec::new() };
+    let end = device[list..].find("</ParameterList>").map_or(device.len(), |e| list + e);
+    let mut out = Vec::new();
+    let mut at = list;
+    while let Some(i) = device[at..end].find("<Plugin") {
+        let open = at + i;
+        let name: String = device[open + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let close = format!("</{name}>");
+        let Some(len) = device[open..end].find(&close) else { break };
+        out.push((open, open + len + close.len()));
+        at = open + len + close.len();
+    }
+    out
+}
+
+/// Whether a slot is bound to a plugin parameter (`<ParameterId>` not -1).
+fn bound(slot: &str) -> bool {
+    value_of(slot, "ParameterId").is_some_and(|(_, v)| v != "-1")
+}
+
+/// Whether something in the set uses a slot: an envelope points at it, or it
+/// is MIDI-mapped.
+fn in_use(slot: &str, used: &HashSet<&str>) -> bool {
+    let target = |tag: &str| {
+        let open = format!("<{tag} Id=\"");
+        slot.find(&open).and_then(|i| slot[i + open.len()..].split('"').next())
+    };
+    slot.contains("<KeyMidi>") || [target("AutomationTarget"), target("ModulationTarget")].into_iter().flatten().any(|id| used.contains(id))
+}
+
 /// Whether a VST2 device can become a VST3 one: it has a device around it and
-/// a chunk, and none of its parameter slots is bound to a VST2 parameter (the
-/// VST3's parameters are numbered differently, so automation and mappings on
-/// them would point at the wrong controls).
-fn vst2_movable(xml: &str, inst: &Instance) -> bool {
+/// a chunk, and no bound parameter slot is automated or mapped (the VST3
+/// numbers its parameters differently, so they would point at the wrong
+/// controls). Live binds a small plugin's first parameters by itself; those
+/// slots are unbound on the way (`unbind`).
+fn vst2_movable(xml: &str, inst: &Instance, used: &HashSet<&str>) -> bool {
     let Some((ds, de)) = inst.device else { return false };
     let device = &xml[ds..de];
-    let block = &xml[inst.start..inst.end];
-    block.contains("<Buffer>")
-        && device.match_indices("<ParameterId Value=\"").all(|(i, m)| device[i + m.len()..].starts_with("-1\""))
+    xml[inst.start..inst.end].contains("<Buffer>")
+        && slots(device).into_iter().all(|(a, b)| !bound(&device[a..b]) || !in_use(&device[a..b], used))
+}
+
+/// `device` with every bound parameter slot unbound, as Live writes an empty
+/// one: ID -1, no name, no place in the list. Live binds the VST3's own
+/// parameters when it loads the plugin.
+fn unbind(device: &str) -> String {
+    let mut out = device.to_string();
+    for (a, b) in slots(device).into_iter().rev() {
+        let slot = &device[a..b];
+        if !bound(slot) {
+            continue;
+        }
+        let mut s = slot.to_string();
+        for (tag, value) in [("ParameterId", "-1"), ("ParameterName", ""), ("VisualIndex", "1073741823")] {
+            if let Some((at, v)) = value_of(&s, tag) {
+                let len = v.len();
+                s.replace_range(at..at + len, value);
+            }
+        }
+        out.replace_range(a..b, &s);
+    }
+    out
 }
 
 /// What an instance becomes under the choices.
@@ -200,17 +277,56 @@ struct Change {
     reset: bool,
     /// 升级插件: the new product's name and how its state converts.
     upgrade: Option<&'static upgrades::Upgrade>,
-    /// The instance is a VST2 that becomes the upgrade's VST3.
-    from_vst2: bool,
+    /// The instance is a VST2 that becomes this VST3.
+    from_vst2: Option<NewVst3>,
+}
+
+/// The VST3 a VST2 device becomes: an upgrade's product, or the plugin's own
+/// VST3 (`vst2to3.rs`).
+#[derive(Clone, Copy)]
+enum NewVst3 {
+    Upgrade(&'static upgrades::Upgrade),
+    Same(&'static vst2to3::Rule),
+}
+
+impl NewVst3 {
+    fn class_id(self) -> [u8; 16] {
+        match self {
+            NewVst3::Upgrade(u) => u.to,
+            NewVst3::Same(r) => r.class_id,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            NewVst3::Upgrade(u) => u.to_name,
+            NewVst3::Same(r) => r.name,
+        }
+    }
+    fn live(self) -> (u32, u32, u32) {
+        match self {
+            NewVst3::Upgrade(u) => u.live,
+            NewVst3::Same(r) => r.live,
+        }
+    }
+    fn state(self, chunk: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            NewVst3::Upgrade(u) => (u.state)(chunk),
+            NewVst3::Same(r) => r.state.convert(r.fourcc, chunk),
+        }
+    }
 }
 
 fn target(lib: &Library, plugin: &Plugin, choice: Option<Choice>) -> Option<Change> {
     let (_, fix) = assess(lib, plugin);
     let decision = check::decide(fix.as_ref(), choice)?;
     if plugin.format == Format::Vst2 {
-        // Only an upgrade moves a VST2 (no picks: its state needs a rule).
-        let u = upgrades::from_vst2(u32::from_be_bytes(plugin.id[..].try_into().ok()?))?;
-        return (decision.pick.is_none()).then_some(Change { class_id: u.to, reset: decision.reset, upgrade: Some(u), from_vst2: true });
+        // Only a rule moves a VST2 (no picks: its state needs one).
+        let id = u32::from_be_bytes(plugin.id[..].try_into().ok()?);
+        let new = match fix? {
+            Fix::Migrate { .. } => NewVst3::Upgrade(upgrades::from_vst2(id)?),
+            _ => NewVst3::Same(vst2to3::find(id)?),
+        };
+        return (decision.pick.is_none()).then_some(Change { class_id: new.class_id(), reset: decision.reset, upgrade: None, from_vst2: Some(new) });
     }
     let (class_id, upgrade) = match (decision.pick, &fix) {
         (Some(id), _) => (id, None),
@@ -220,7 +336,7 @@ fn target(lib: &Library, plugin: &Plugin, choice: Option<Choice>) -> Option<Chan
         }
         (None, _) => (target_by_name(lib, plugin)?.class_id, None),
     };
-    Some(Change { class_id, reset: decision.reset, upgrade, from_vst2: false })
+    Some(Change { class_id, reset: decision.reset, upgrade, from_vst2: None })
 }
 
 /// The four `<Fields.N>` words of a class ID (as FL stores it), as Live writes them.
@@ -229,11 +345,11 @@ fn uid_words(class_id: [u8; 16]) -> [i32; 4] {
     std::array::from_fn(|i| u32::from_be_bytes(fuid[4 * i..4 * i + 4].try_into().unwrap()) as i32)
 }
 
-/// A `<VstPluginInfo>` block as the upgrade's `<Vst3PluginInfo>`: window
-/// position, on/off and overwrite number carried over, the chunk through the
-/// upgrade's conversion as `<ProcessorState>` (kept verbatim, line breaks and
-/// all, when the conversion leaves it as is).
-fn vst3_info_from_vst2(block: &str, up: &upgrades::Upgrade, reset: bool) -> Option<String> {
+/// A `<VstPluginInfo>` block as `new`'s `<Vst3PluginInfo>`: window position,
+/// on/off and overwrite number carried over, the chunk through `new`'s
+/// conversion as `<ProcessorState>` (kept verbatim, line breaks and all, when
+/// the conversion leaves it as is).
+fn vst3_info_from_vst2(block: &str, new: NewVst3, reset: bool) -> Option<String> {
     let val = |tag: &str, default: &'static str| value_of(block, tag).map_or(default.to_string(), |(_, v)| v.to_string());
     let id = block.strip_prefix("<VstPluginInfo Id=\"").and_then(|r| r.split('"').next()).unwrap_or("0");
     let preset_id = block.find("<VstPreset Id=\"").and_then(|i| block[i + 15..].split('"').next()).unwrap_or("0");
@@ -241,20 +357,20 @@ fn vst3_info_from_vst2(block: &str, up: &upgrades::Upgrade, reset: bool) -> Opti
     let text = &block[a..b];
     let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     let old: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect::<Option<_>>()?;
-    let new = (up.state)(&old)?;
+    let converted = new.state(&old)?;
     let state = if reset {
         "<ProcessorState />".to_string()
-    } else if new == old {
+    } else if converted == old {
         format!("<ProcessorState>{text}</ProcessorState>")
     } else {
-        format!("<ProcessorState>{}</ProcessorState>", new.iter().map(|b| format!("{b:02X}")).collect::<String>())
+        format!("<ProcessorState>{}</ProcessorState>", converted.iter().map(|b| format!("{b:02X}")).collect::<String>())
     };
-    let w = uid_words(up.to);
+    let w = uid_words(new.class_id());
     let uid = format!(
         "<Uid>\n<Fields.0 Value=\"{}\" />\n<Fields.1 Value=\"{}\" />\n<Fields.2 Value=\"{}\" />\n<Fields.3 Value=\"{}\" />\n</Uid>",
         w[0], w[1], w[2], w[3]
     );
-    let (inputs, outputs, device_type) = up.live;
+    let (inputs, outputs, device_type) = new.live();
     Some(format!(
         r#"<Vst3PluginInfo Id="{id}">
 <WinPosX Value="{x}" />
@@ -300,7 +416,7 @@ fn vst3_info_from_vst2(block: &str, up: &upgrades::Upgrade, reset: bool) -> Opti
         y = val("WinPosY", "0"),
         opn = val("OverwriteProtectionNumber", "3074"),
         on = val("IsOn", "true"),
-        name = up.to_name,
+        name = escape(new.name()),
     ))
 }
 
@@ -383,14 +499,14 @@ pub fn apply(lib: &Library, set: &mut Set, choices: &Choices) -> usize {
     // Back to front, so earlier offsets stay valid.
     for inst in instances(&set.xml).into_iter().rev() {
         if let Some(change) = target(lib, &inst.plugin, choices.get(&inst.plugin).copied()) {
-            if change.from_vst2 {
-                let (Some(up), Some((ds, de))) = (change.upgrade, inst.device) else { continue };
-                if !vst2_movable(&set.xml, &inst) {
+            if let Some(new) = change.from_vst2 {
+                let Some((ds, de)) = inst.device else { continue };
+                if !vst2_movable(&set.xml, &inst, &pointees(&set.xml)) {
                     continue;
                 }
-                let Some(info) = vst3_info_from_vst2(&set.xml[inst.start..inst.end], up, change.reset) else { continue };
-                let device = format!("{}{}{}", &set.xml[ds..inst.start], info, &set.xml[inst.end..de]);
-                set.xml.replace_range(ds..de, &with_branch_id(&device, up.to));
+                let Some(info) = vst3_info_from_vst2(&set.xml[inst.start..inst.end], new, change.reset) else { continue };
+                let device = format!("{}{}{}", &set.xml[ds..inst.start], info, unbind(&set.xml[inst.end..de]));
+                set.xml.replace_range(ds..de, &with_branch_id(&device, new.class_id()));
                 changed += 1;
                 continue;
             }
@@ -541,9 +657,9 @@ mod tests {
         let up = upgrades::from_vst2(u32::from_be_bytes(*b"Ni$D")).unwrap();
         let found = instances(KONTAKT_VST2);
         assert_eq!(found.len(), 1);
-        assert!(vst2_movable(KONTAKT_VST2, &found[0]));
+        assert!(vst2_movable(KONTAKT_VST2, &found[0], &pointees(KONTAKT_VST2)));
         let inst = &found[0];
-        let info = vst3_info_from_vst2(&KONTAKT_VST2[inst.start..inst.end], up, false).unwrap();
+        let info = vst3_info_from_vst2(&KONTAKT_VST2[inst.start..inst.end], NewVst3::Upgrade(up), false).unwrap();
         let (ds, de) = inst.device.unwrap();
         let device = format!("{}{}{}", &KONTAKT_VST2[ds..inst.start], info, &KONTAKT_VST2[inst.end..de]);
         let device = with_branch_id(&device, up.to);
@@ -559,9 +675,21 @@ mod tests {
         assert!(xml.contains(r#"<Vst3Preset Id="5">"#) && xml.contains(r#"<OverwriteProtectionNumber Value="2816" />"#));
         assert!(xml.contains("device:vst3:instr:5653544e-694b-386b-6f6e-74616b742038"));
         assert!(!xml.contains("VstPluginInfo") && !xml.contains("<Buffer>"));
-        // A bound parameter slot stops it.
-        let bound = KONTAKT_VST2.replace(r#"<ParameterId Value="-1" />"#, r#"<ParameterId Value="3" />"#);
-        assert!(!vst2_movable(&bound, &instances(&bound)[0]));
+        // A bound slot that nothing uses is unbound on the way…
+        let bound = KONTAKT_VST2.replace(
+            r#"<ParameterId Value="-1" />"#,
+            r#"<ParameterName Value="Volume" /><ParameterId Value="3" /><VisualIndex Value="0" /><AutomationTarget Id="9"></AutomationTarget>"#,
+        );
+        let inst = &instances(&bound)[0];
+        assert!(vst2_movable(&bound, inst, &pointees(&bound)));
+        let (_, de) = inst.device.unwrap();
+        let rest = unbind(&bound[inst.end..de]);
+        assert!(rest.contains(r#"<ParameterName Value="" /><ParameterId Value="-1" /><VisualIndex Value="1073741823" />"#));
+        // …but an automated or MIDI-mapped one stops it.
+        let automated = bound.replace("</Ableton>", r#"<EnvelopeTarget><PointeeId Value="9" /></EnvelopeTarget></Ableton>"#);
+        assert!(!vst2_movable(&automated, &instances(&automated)[0], &pointees(&automated)));
+        let mapped = bound.replace("<AutomationTarget", "<KeyMidi></KeyMidi><AutomationTarget");
+        assert!(!vst2_movable(&mapped, &instances(&mapped)[0], &pointees(&mapped)));
     }
 
     #[test]

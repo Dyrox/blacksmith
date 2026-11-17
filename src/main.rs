@@ -19,6 +19,7 @@ mod repair;
 mod style;
 mod upgrades;
 mod view;
+mod vst2to3;
 mod vst3;
 
 use std::collections::HashSet;
