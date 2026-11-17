@@ -16,7 +16,7 @@
 已完成：Serum、OTT（含旧版 OTT VST3 的 ID 修复）。
 
 Live 工程（.als）里的 VST2 → VST3：`supply 1.als` 加了 19 个（FabFilter 新一代 6 个、Valhalla 9 个、
-soothe2、PITCHMAP、Vital、Blackhole），待在 Live 里打开 `test-projects/supply 1 (修复).als` 验证。
+soothe2、PITCHMAP、Vital、Blackhole），已在 Live 验证（重新保存后和插件自己的 VST3 逐字节一致）。
 `supply 2.als` 加了 FabFilter 老一代：11 个已在 Live 验证（重新保存后和同预设的 VST3 一致）；
 Volcano 2、Pro-G 有几个档位差一格（默认不勾）；Simplon 的 VST3 不认交接，已去掉。
 来源和细节见 `docs/plugins.md`。上表是 FL 工程要的。

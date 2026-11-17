@@ -36,10 +36,12 @@ Rules are kept in three places:
 ### From `test-projects/supply 1.als` (Live 12.2, Nov 2026)
 
 This set holds every plugin below as both VST2 and VST3. All rules are in `src/vst2to3.rs`.
-The converted copy, `test-projects/supply 1 (修复).als`, has not been opened in Live yet, so
-every rule here is unverified.
+Verified (Nov 2026): the owner opened the converted copy in Live 12.2 and saved it as
+`test-projects/supply 1 (修复) 2.als`. `blacksmith --dump` shows every converted VST3's state
+byte-identical to the plugin's own VST3 next to it, JUCE tails included. All 19 rules are on by
+default.
 
-| Plugin | VST2 ID | State conversion (`State::…`) | Checked |
+| Plugin | VST2 ID | State conversion (`State::…`) | Before re-save |
 |---|---|---|---|
 | FabFilter Pro-Q 3 | `FQ3p` | `FabFilter`: `FFBS` block + `FFpr` 1 0 | byte-identical |
 | FabFilter Pro-Q 4 | `FQ4p` | `FabFilter` | byte-identical |

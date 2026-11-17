@@ -634,6 +634,8 @@ mod tests {
         let jucey = instances(&s.xml)[2].plugin.clone();
         let mut choices = Choices::new();
         choices.insert(jucey.clone(), Choice::Pick { id: *b"XTSVsfsXerum\0\0\0\0", reset: false });
+        // ValhallaShimmer's VST2 would upgrade by default; keep it as it is here.
+        choices.insert(instances(&s.xml)[1].plugin.clone(), Choice::Off);
         assert_eq!(apply(library(Host::Live), &mut s, &choices), 1);
         let after = instances(&s.xml);
         assert_eq!(after[2].plugin.id, b"XTSVsfsXerum\0\0\0\0");
