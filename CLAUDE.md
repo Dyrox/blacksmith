@@ -45,7 +45,8 @@ light and ergonomic; neutral colours following system light/dark; springy
   `LengthPrefixed`, `FabFilter`). Shown as `Fix::Upgrade` with `How::Matched` (unverified) or
   `How::Known`. Which project each rule (here and in `plugins.rs` / `upgrades.rs`) came from:
   `docs/plugins.md` — add a row with every new rule.
-- `src/labs.rs` — LABS state → INSTRUMENT: JUCE binary XML (`VC2!`) `<Labs>` → `<SpliceINSTRUMENT>`.
+- `src/labs.rs` — LABS state → Splice INSTRUMENT: the JUCE binary XML (`VC2!`) `<Labs>` preset handed
+  over as is; INSTRUMENT reads it itself (verified in Live, Nov 2026).
 - `src/vst3.rs` — Steinberg's derived class ID and default VST3 paths.
 - `src/livedb.rs` — reads Live's plugin database (`Live Database/Live-plugins-<n>.db`, SQLite via
   rusqlite, read-only): `device:vst:<kind>:<id>?n=…` / `device:vst3:<kind>:<FUID>`.

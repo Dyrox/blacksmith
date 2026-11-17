@@ -6,8 +6,11 @@
 //! (Soft Piano in LABS VST2, LABS VST3 and INSTRUMENT, `docs/plugins.md`).
 //!
 //! The LABS VST2's chunk and the LABS VST3's state (in a `VstW` hand-over)
-//! hold the same XML. INSTRUMENT names the general controls by number
-//! (`PARAMS`) and stores none of LABS's per-instrument `<PARAM>`s.
+//! hold the same XML, and INSTRUMENT reads a `<Labs>` preset itself: handed
+//! over as is, it saves exactly what it saves for the same preset loaded fresh.
+//! (Rewriting it the way INSTRUMENT writes it, general controls renumbered,
+//! carried LABS's values literally — Soft Piano's dynamics 0.0 where
+//! INSTRUMENT's own preset has 1.0 — so that was dropped.)
 
 use crate::convert::{fxb_chunk_bank, vstw_chunk};
 
@@ -15,16 +18,6 @@ use crate::convert::{fxb_chunk_bank, vstw_chunk};
 const XML_MAGIC: &[u8; 4] = b"VC2!";
 /// INSTRUMENT's VST2-style ID inside its `VstW` state.
 const INSTRUMENT_ID: u32 = u32::from_be_bytes(*b"Inst");
-
-/// LABS `<PARAM id>` → INSTRUMENT's, paired by their MIDI CC (gain 7, pan 10,
-/// expression 11, dynamics 1) and order.
-const PARAMS: &[(&str, &str)] = &[
-    ("g_gain", "g_general_param_1"),
-    ("g_pan", "g_general_param_2"),
-    ("g_tune", "g_general_param_3"),
-    ("i_expression", "g_general_param_4"),
-    ("i_dynamics", "g_general_param_5"),
-];
 
 /// The XML text of a JUCE binary XML chunk.
 fn xml(chunk: &[u8]) -> Option<&str> {
@@ -50,39 +43,9 @@ fn labs_xml(state: &[u8]) -> Option<&str> {
     text.contains("<Labs>").then_some(text)
 }
 
-/// A LABS preset as INSTRUMENT writes it: the root renamed, the general
-/// controls renumbered, LABS's other `<PARAM>`s left out (INSTRUMENT falls
-/// back to the preset's values).
-fn to_instrument(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.replace("<Labs>", "<SpliceINSTRUMENT>").replace("</Labs>", "</SpliceINSTRUMENT>");
-    while let Some(at) = rest.find("<PARAM id=\"") {
-        let end = at + rest[at..].find("/>").map_or(rest.len() - at, |e| e + 2);
-        out.push_str(&rest[..at]);
-        let elem = &rest[at..end];
-        let id = elem["<PARAM id=\"".len()..].split('"').next().unwrap_or("");
-        if let Some((_, new)) = PARAMS.iter().find(|(old, _)| *old == id) {
-            out.push_str(&elem.replacen(id, new, 1));
-        } else {
-            // Drop the element and the whitespace before it.
-            let trimmed = out.trim_end().len();
-            out.truncate(trimmed);
-        }
-        rest = rest[end..].to_string();
-    }
-    out.push_str(&rest);
-    out
-}
-
-/// LABS state → INSTRUMENT state, the preset converted (`to_instrument`).
-pub fn converted(state: &[u8]) -> Option<Vec<u8>> {
-    Some(fxb_chunk_bank(INSTRUMENT_ID, &chunk(&to_instrument(labs_xml(state)?))))
-}
-
-/// LABS state → INSTRUMENT state, the `<Labs>` preset as it is. Test variant A
-/// (`supply 3 (A 原样).als`), kept until Live decides between the two.
-#[allow(dead_code)]
-pub fn as_is(state: &[u8]) -> Option<Vec<u8>> {
+/// LABS state (VST2 chunk or VST3 state) → INSTRUMENT state: the `<Labs>`
+/// preset as it is, in INSTRUMENT's `VstW` hand-over.
+pub fn to_instrument(state: &[u8]) -> Option<Vec<u8>> {
     Some(fxb_chunk_bank(INSTRUMENT_ID, &chunk(labs_xml(state)?)))
 }
 
@@ -93,25 +56,16 @@ mod tests {
     const LABS: &str = r#"<?xml version="1.0" encoding="UTF-8"?> <Labs><META family="Soft Piano" name="Soft Piano"/><PARAMS><PARAM id="g_gain" value="1.0" cc="7"/><PARAM id="i_reverb" value="0.0" cc="19"/><PARAM id="i_dynamics" value="0.0" cc="1"/></PARAMS></Labs>"#;
 
     #[test]
-    fn preset_moves() {
-        let out = to_instrument(LABS);
-        assert_eq!(
-            out,
-            r#"<?xml version="1.0" encoding="UTF-8"?> <SpliceINSTRUMENT><META family="Soft Piano" name="Soft Piano"/><PARAMS><PARAM id="g_general_param_1" value="1.0" cc="7"/><PARAM id="g_general_param_5" value="0.0" cc="1"/></PARAMS></SpliceINSTRUMENT>"#
-        );
-    }
-
-    #[test]
     fn states_wrap() {
         // From the VST2's chunk and from the VST3's hand-over alike.
         let vst2 = chunk(LABS);
         let vst3 = fxb_chunk_bank(u32::from_be_bytes(*b"SfLb"), &vst2);
         for state in [&vst2, &vst3] {
-            let out = as_is(state).unwrap();
+            let out = to_instrument(state).unwrap();
             assert_eq!(&out[32..36], b"Inst");
             assert_eq!(xml(vstw_chunk(&out).unwrap()), Some(LABS));
-            assert!(xml(vstw_chunk(&converted(state).unwrap()).unwrap()).unwrap().contains("<SpliceINSTRUMENT>"));
         }
-        assert_eq!(as_is(b"VC2!\x03\0\0\0<a/>"), None);
+        // Not a LABS preset.
+        assert_eq!(to_instrument(b"VC2!\x04\0\0\0<a/>\0"), None);
     }
 }

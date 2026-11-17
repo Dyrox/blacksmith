@@ -69,7 +69,7 @@ const KONTAKT_8: [u8; 16] = *b"NTSVKik8ontakt 8";
 const KONTAKT_8_TEMPLATE: &[u8] = include_bytes!("../assets/kontakt8-vst3-template.bin");
 /// Splice INSTRUMENT (FUID `56535449-6e73-7473-706c69636520696e`).
 const INSTRUMENT: [u8; 16] = *b"ITSVsnstplice in";
-const LABS_NOTE: &str = "Spitfire LABS 已停产（2025 年 10 月起不再更新），音色搬到了 Splice INSTRUMENT：同一个预设交给 INSTRUMENT";
+const LABS_NOTE: &str = "Spitfire LABS 已停产（2025 年 10 月起不再更新），音色搬到了 Splice INSTRUMENT：预设原样交给 INSTRUMENT，它自己读懂，已在 Ableton Live 12 验证（FL 里还不行）";
 
 pub const UPGRADES: &[Upgrade] = &[
     Upgrade {
@@ -104,26 +104,30 @@ pub const UPGRADES: &[Upgrade] = &[
         to_name: "Splice INSTRUMENT",
         vendor: "Splice",
         note: LABS_NOTE,
-        verified: false,
+        // Checked by the owner (Nov 2026): Soft Piano opens in INSTRUMENT, which
+        // re-saves what it saves for the preset loaded fresh (`supply 3`).
+        verified: true,
         deprecated: true,
         from: Source::Vst3(*b"STSVLflbabs\0\0\0\0\0"),
         to: INSTRUMENT,
         template: None,
         live: (0, 1, 1),
-        state: labs::converted,
+        state: labs::to_instrument,
     },
     Upgrade {
         from_name: "LABS（VST2）",
         to_name: "Splice INSTRUMENT",
         vendor: "Splice",
         note: LABS_NOTE,
-        verified: false,
+        // Checked by the owner (Nov 2026): Soft Piano opens in INSTRUMENT, which
+        // re-saves what it saves for the preset loaded fresh (`supply 3`).
+        verified: true,
         deprecated: true,
         from: Source::Vst2(u32::from_be_bytes(*b"SfLb")),
         to: INSTRUMENT,
         template: None,
         live: (0, 1, 1),
-        state: labs::converted,
+        state: labs::to_instrument,
     },
 ];
 

@@ -49,14 +49,22 @@ by hand, track by track. The set holds "Soft Piano" in LABS VST2, LABS VST3 and 
   instrument `<PARAM>`s, and a few fields of its own (`layerIdx`, `n_main`, `<UIState>`,
   `<GLOBALCONVIR sampleFileId=…>`).
 
-| Rule | Conversion (`src/labs.rs`) | Status |
-|---|---|---|
-| LABS VST3 → INSTRUMENT (停产插件) | `converted`: root renamed, general controls renumbered, other `<PARAM>`s left out | unverified, Live only (no FL template) |
-| LABS VST2 → INSTRUMENT (停产插件) | same | unverified, Live only |
+Two copies were tried in Live 12.2 (the owner opened both, Nov 2026, both played Soft Piano):
 
-Two test copies sit next to the set: `supply 3 (A 原样).als` (the `<Labs>` XML handed over as
-is) and `supply 3 (B 转换).als` (converted). Whichever INSTRUMENT opens with the preset and its
-settings decides the rule.
+- **A, as is** (`supply 3 (A 原样).als`): the `<Labs>` XML handed to INSTRUMENT unchanged.
+  INSTRUMENT reads it itself; re-saved, its state equals the INSTRUMENT instance next to it,
+  apart from the browser's `<UIState>`.
+- **B, converted** (`supply 3 (B 转换).als`): rewritten as INSTRUMENT writes it. INSTRUMENT kept
+  LABS's values literally: dynamics 0.0 where its own Soft Piano has 1.0, and `layerIdx` -1.
+
+So the rule hands the preset over as is (`labs::to_instrument`).
+
+| Rule | Conversion | Status |
+|---|---|---|
+| LABS VST3 → INSTRUMENT (停产插件) | `<Labs>` XML as is, `VstW` with ID `Inst` | verified, Live 12 (default settings of one preset); Live only, no FL template |
+| LABS VST2 → INSTRUMENT (停产插件) | same | verified, Live 12 |
+
+Not checked yet: a LABS instance with knobs changed from the preset.
 
 ### From `test-projects/supply 1.als` (Live 12.2, Nov 2026)
 
