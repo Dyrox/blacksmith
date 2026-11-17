@@ -37,7 +37,8 @@ light and ergonomic; neutral colours following system light/dark; springy
   (always opt-in) in FL (`repair::move_vst3`: new ID, name, path, param table) and Live
   (`als::upgraded`: Uid, info `<Name>`, `<ProcessorState>` through the transform). A new upgrade
   needs a project with both plugins holding the same sound.
-- `src/vst2to3.rs` — VST2 → VST3 of the same plugin in Live sets: per VST2 ID the VST3 class ID,
+- `src/vst2to3.rs` + `assets/vst2to3.tsv` (the rules as data, one row per plugin) — VST2 → VST3 of
+  the same plugin in Live sets: per VST2 ID the VST3 class ID,
   Live's (inputs, outputs, DeviceType) and how the VST3 holds the chunk (`State::AsIs`, `VstW`,
   `LengthPrefixed`, `FabFilter`). Shown as `Fix::Upgrade` with `How::Matched` (unverified) or
   `How::Known`. Which project each rule (here and in `plugins.rs` / `upgrades.rs`) came from:

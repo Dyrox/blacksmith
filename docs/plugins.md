@@ -9,7 +9,8 @@ Rules are kept in three places:
 
 - `src/plugins.rs`: 官方支持 for FL.
 - `src/upgrades.rs`: 升级插件, moving to a newer product.
-- `src/vst2to3.rs`: VST2 → VST3 of the same plugin in Live sets.
+- `assets/vst2to3.tsv`: VST2 → VST3 of the same plugin in Live sets, one row per plugin (the
+  state conversions it names are in `src/vst2to3.rs`).
 
 | Status | Meaning |
 |---|---|
@@ -35,7 +36,7 @@ Rules are kept in three places:
 
 ### From `test-projects/supply 1.als` (Live 12.2, Nov 2026)
 
-This set holds every plugin below as both VST2 and VST3. All rules are in `src/vst2to3.rs`.
+This set holds every plugin below as both VST2 and VST3. All rules are rows in `assets/vst2to3.tsv`.
 Verified (Nov 2026): the owner opened the converted copy in Live 12.2 and saved it as
 `test-projects/supply 1 (修复) 2.als`. `blacksmith --dump` shows every converted VST3's state
 byte-identical to the plugin's own VST3 next to it, JUCE tails included. All 19 rules are on by
@@ -142,5 +143,7 @@ table (more sets at different settings).
 1. Load the plugin as VST2 and as VST3 in one project or set, on the same preset. Change a few
    settings the same way on both.
 2. Save it into `test-projects/`.
-3. Compare the two states and add the rule.
-4. Add a row here. Once it has been opened in the host, mark it verified.
+3. Compare the two states (`blacksmith --dump`) and add the rule. For a Live set that is one row
+   in `assets/vst2to3.tsv`, unless the plugin needs a new kind of state conversion.
+4. Add a row here. Once the host has re-saved the converted copy and `--dump` shows it equal to
+   the plugin's own VST3, mark it verified (here and in the table).

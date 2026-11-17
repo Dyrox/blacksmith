@@ -1,0 +1,41 @@
+# VST2 → VST3 of the same plugin in Live sets — read by src/vst2to3.rs.
+# One row per plugin; where each came from and what was checked: docs/plugins.md.
+# vst2: VST2 unique ID (4 characters). vst3: class ID as Live writes it (FUID, 32 hex digits).
+# io: how Live writes the VST3 — fx (1 in, 1 out), fx-stereo (2 in, 1 out), synth (0 in, 1 out).
+# state: how the VST3 holds the VST2's state — as-is, vstw, length-prefixed, fabfilter, vstw-params
+#   (see `State` in src/vst2to3.rs).
+# status: verified (re-saved by Live, state equal to the plugin's own VST3) is on by default;
+#   unverified must be ticked.
+# vst2	vst3	io	state	status	name	from
+FQ3p	72c4db717a4d459ab97e51745d84b39d	fx-stereo	fabfilter	verified	Pro-Q 3	supply 1.als
+FQ4p	ed57bd725c60467ea64dd2f400758b6f	fx-stereo	fabfilter	verified	Pro-Q 4	supply 1.als
+FR2p	6070873c802a4b078fc06ab5459154e9	fx	fabfilter	verified	Pro-R 2	supply 1.als
+FS2a	8d067533d8a0491dbaa36c064c6abbfb	fx-stereo	fabfilter	verified	Saturn 2	supply 1.als
+F3Ts	d2ee67f2c552402d902115931afdae6b	fx-stereo	fabfilter	verified	Timeless 3	supply 1.als
+FV3l	299b276ce27b4f5195968a0f8600e9d1	fx-stereo	fabfilter	verified	Volcano 3	supply 1.als
+SthB	abcdef019182faeb4f656b5353746842	fx-stereo	as-is	verified	soothe2	supply 1.als
+PTMP	f9522de65a114ab0aa6d0ada740323ed	fx	length-prefixed	verified	PITCHMAP	supply 1.als
+dLay	565354644c617976616c68616c6c6164	fx	vstw	verified	ValhallaDelay	supply 1.als
+FqEh	5653544671456876616c68616c6c6166	fx	vstw	verified	ValhallaFreqEcho	supply 1.als
+plat	565354706c617476616c68616c6c6170	fx	vstw	verified	ValhallaPlate	supply 1.als
+Ruum	5653545275756d76616c68616c6c6172	fx	vstw	verified	ValhallaRoom	supply 1.als
+shmr	56535473686d7276616c68616c6c6173	fx	vstw	verified	ValhallaShimmer	supply 1.als
+SpMd	56535453704d6476616c68616c6c6173	fx	vstw	verified	ValhallaSpaceModulator	supply 1.als
+sMas	565354734d617376616c68616c6c6173	fx	vstw	verified	ValhallaSupermassive	supply 1.als
+uber	5653547562657276616c68616c6c6175	fx	vstw	verified	ValhallaUberMod	supply 1.als
+vee3	5653547665653376616c68616c6c6176	fx	vstw	verified	ValhallaVintageVerb	supply 1.als
+Vita	56535456697461766974616c00000000	synth	vstw	verified	Vital	supply 1.als
+HOLE	565354484f4c45626c61636b686f6c65	fx	vstw	verified	Blackhole	supply 1.als
+FF01	9240fc4010cd45a0b7dacecaddc2e97a	synth	vstw-params	verified	One	supply 2.als
+FV2l	5d923348adf743b59f86ec29572b103e	fx-stereo	vstw-params	unverified	Volcano 2	supply 2.als
+FTms	e45b65335e7d4e28b4ca15d7940a3a6d	fx-stereo	vstw-params	verified	Timeless 2	supply 2.als
+FSat	5460882ac2aa486188ccf15b4acc25c6	fx-stereo	vstw-params	verified	Saturn	supply 2.als
+FPRr	036eb5302a5911e2a28170076288709b	fx	vstw-params	verified	Pro-R	supply 2.als
+FQ2p	55fd08e6c00b44a697da68f61c6fd576	fx-stereo	vstw-params	verified	Pro-Q 2	supply 2.als
+FPMb	c3b68142c79846f282b73cabdf139076	fx-stereo	vstw-params	verified	Pro-MB	supply 2.als
+FL2p	afd92f729a0447b7b5e8d1d568dea985	fx-stereo	vstw-params	verified	Pro-L 2	supply 2.als
+FPLr	5af2703ae65f11deb8047c9c56d89593	fx-stereo	vstw-params	verified	Pro-L	supply 2.als
+FPGr	9d1dccf7918a436fa3cdd7115d8b193b	fx-stereo	vstw-params	unverified	Pro-G	supply 2.als
+FPSr	59e324d08ee811e1b8578101bbe59b18	fx-stereo	vstw-params	verified	Pro-DS	supply 2.als
+FC2p	79f415e3c8e74807ad5da3cf7024f618	fx-stereo	vstw-params	verified	Pro-C 2	supply 2.als
+FMic	751afc3415434cbcaa73672a109be0ff	fx	vstw-params	verified	Micro	supply 2.als

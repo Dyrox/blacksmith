@@ -272,9 +272,13 @@ fn slots(device: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// An empty parameter slot as Live writes it: no parameter, no name, no place
+/// in the list (`VisualIndex` is Live's `0x3fffffff`).
+const UNBOUND: [(&str, &str); 3] = [("ParameterId", "-1"), ("ParameterName", ""), ("VisualIndex", "1073741823")];
+
 /// Whether a slot is bound to a plugin parameter (`<ParameterId>` not -1).
 fn bound(slot: &str) -> bool {
-    value_of(slot, "ParameterId").is_some_and(|(_, v)| v != "-1")
+    value_of(slot, "ParameterId").is_some_and(|(_, v)| v != UNBOUND[0].1)
 }
 
 /// Whether something in the set uses a slot: an envelope points at it, or it
@@ -310,7 +314,7 @@ fn unbind(device: &str) -> String {
             continue;
         }
         let mut s = slot.to_string();
-        for (tag, value) in [("ParameterId", "-1"), ("ParameterName", ""), ("VisualIndex", "1073741823")] {
+        for (tag, value) in UNBOUND {
             if let Some((at, v)) = value_of(&s, tag) {
                 let len = v.len();
                 s.replace_range(at..at + len, value);

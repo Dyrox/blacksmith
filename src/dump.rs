@@ -288,16 +288,6 @@ fn fabf(b: &[u8]) -> Option<(String, Vec<f32>)> {
     Some((name, values))
 }
 
-/// Live's parameter buffer for a VST2 (`FxBk`): program name (28 bytes), then f32 LE values.
-fn live_params(b: &[u8]) -> Option<(String, Vec<f32>)> {
-    let (name, values) = (b.get(..28)?, b.get(28..)?);
-    if values.len() % 4 != 0 {
-        return None;
-    }
-    let name = String::from_utf8_lossy(name.split(|&c| c == 0).next()?).into_owned();
-    Some((name, values.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect()))
-}
-
 /// What a saved state holds, in a few words.
 fn describe(s: &Saved) -> String {
     let b = &s.state;
@@ -305,7 +295,7 @@ fn describe(s: &Saved) -> String {
         return "无存档".into();
     }
     if s.plugin.format == Format::Vst2 && s.kind == "FxBk" {
-        if let Some((name, v)) = live_params(b) {
+        if let Some((name, v)) = crate::vst2to3::live_params(b) {
             return format!("参数 {} 个，程序 \"{name}\"", v.len());
         }
     }
